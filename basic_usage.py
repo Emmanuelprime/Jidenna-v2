@@ -20,7 +20,7 @@ def main():
     print("=" * 60)
     
     # Create controller with context manager
-    with RobotController(port="COM19") as robot:
+    with RobotController(port="/dev/ttyUSB0") as robot:
         
         # Wait for robot to be ready
         print("\nWaiting for robot to initialize...")
@@ -60,13 +60,13 @@ def main():
         # # Small pause
         # time.sleep(1)
         
-        # # Move backward
-        # print("\n3. Moving backward at 0.2 m/s for 2 seconds...")
-        # success = robot.move_backward(0.2, duration=2.0)
-        # if success:
-        #     print("✅ Backward movement complete")
-        # else:
-        #     print("❌ Backward movement failed")
+        # Move backward
+        print("\n3. Moving backward at 0.2 m/s for 2 seconds...")
+        success = robot.move_backward(0.2, duration=2.0)
+        if success:
+            print("✅ Backward movement complete")
+        else:
+            print("❌ Backward movement failed")
         
         # Stop
         robot.stop()
