@@ -8,7 +8,7 @@ import time
 import sys
 import threading
 
-PORT = 'COM19'  # Change to your port
+PORT = '/dev/ttyUSB0'  # Change to your port
 BAUD = 115200
 
 def reader_thread(ser):
