@@ -29,6 +29,13 @@
 #define LEFT_FORWARD   HIGH
 #define RIGHT_FORWARD  LOW
 
+// ─── Robot kinematics ─────────────────────────────────────────────────────────
+#define WHEEL_DIAMETER_M    0.165f
+#define WHEEL_SEPARATION_M  0.521f
+#define PULSES_PER_REV      45
+#define METERS_PER_PULSE    (PI * WHEEL_DIAMETER_M / PULSES_PER_REV)
+#define HALF_TRACK          (WHEEL_SEPARATION_M * 0.5f)
+
 // Variables
 volatile long leftPulses = 0;
 volatile long rightPulses = 0;
