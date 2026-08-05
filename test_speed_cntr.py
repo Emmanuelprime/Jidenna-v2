@@ -1,7 +1,7 @@
 import serial
 import time
 
-ser = serial.Serial('COM19', 115200, timeout=1)
+ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
 time.sleep(2)
 
 print("Robot Controller")
