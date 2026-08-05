@@ -1,4 +1,6 @@
 #include <math.h>
+#include <MPU6050_tockn.h>
+#include <Wire.h>
 
 #define LEFT_PWM     22
 #define LEFT_DIR     23
@@ -6,6 +8,9 @@
 #define RIGHT_PWM    19
 #define RIGHT_DIR    26
 #define RIGHT_SC     35
+
+#define I2C_SDA 32
+#define I2C_SCL 33
 
 #define LEFT_PWM_CH   2
 #define RIGHT_PWM_CH  1
@@ -25,13 +30,22 @@
 
 #define FILTER_ALPHA 0.3f
 
+// MPU6050 heading correction - MUCH MORE AGGRESSIVE
+#define HEADING_CORRECTION_KP 15.0f   // Increased from 8
+#define HEADING_CORRECTION_KI 0.3f    // Increased from 0.15
+#define HEADING_CORRECTION_KD 0.15f   // Increased from 0.08
+
+#define COMPLEMENTARY_ALPHA 0.98f
+
+MPU6050 mpu6050(Wire);
+
 // Forward calibration
 #define LEFT_SLOPE_FWD     0.0411f
 #define LEFT_INTERCEPT_FWD -0.2392f
 #define RIGHT_SLOPE_FWD    0.0267f
 #define RIGHT_INTERCEPT_FWD -0.0816f
 
-// Reverse calibration (swapped characteristics)
+// Reverse calibration
 #define LEFT_SLOPE_REV     0.0267f
 #define LEFT_INTERCEPT_REV -0.0816f
 #define RIGHT_SLOPE_REV    0.0411f
@@ -68,9 +82,22 @@ float x = 0.0;
 float y = 0.0;
 float theta = 0.0;
 
-float V = 0.0;  // Linear velocity command (m/s)
-float W = 0.0;  // Angular velocity command (rad/s)
+float V = 0.0;
+float W = 0.0;
 float max_speed = 0.8f;
+float yaw = 0.0;
+float yawFiltered = 0.0;
+float gyro_z = 0.0;
+
+// Heading correction variables
+float targetHeading = 0.0;
+float headingIntegral = 0.0;
+float headingPrevError = 0.0;
+bool headingLockEnabled = true;
+
+// Debug
+float lastHeadingError = 0.0;
+float lastHeadingCorrection = 0.0;
 
 unsigned long samplerate = 50;
 
@@ -109,16 +136,93 @@ unsigned long lastEncoderPrint = 0;
 unsigned long lastSpeedMeasure = 0;
 unsigned long lastPIDTime = 0;
 unsigned long lastRampTime = 0;
+unsigned long lastMPURead = 0;
+unsigned long lastDebugPrint = 0;
 
-// Differential drive controller: converts (V, W) to wheel speeds
+void getMpuData() {
+  mpu6050.update();
+  
+  float rawYaw = mpu6050.getAngleZ() * PI / 180.0;
+  gyro_z = mpu6050.getGyroZ() * PI / 180.0;
+  
+  if (fabs(gyro_z) < 2.0f) {
+    yawFiltered = COMPLEMENTARY_ALPHA * (yawFiltered + gyro_z * 0.01f) + (1.0f - COMPLEMENTARY_ALPHA) * rawYaw;
+  } else {
+    yawFiltered = yawFiltered + gyro_z * 0.01f;
+  }
+  
+  yaw = rawYaw;
+}
+
+float headingCorrectionPID(float targetHeading, float currentHeading, float gyroRate, float dt) {
+  float error = targetHeading - currentHeading;
+  
+  while (error > PI) error -= 2 * PI;
+  while (error < -PI) error += 2 * PI;
+  
+  // Much more aggressive P
+  float P = HEADING_CORRECTION_KP * error;
+  
+  // I term
+  headingIntegral += error * dt;
+  headingIntegral = constrain(headingIntegral, -0.8f, 0.8f);
+  float I = HEADING_CORRECTION_KI * headingIntegral;
+  
+  // D term from gyro
+  float D = HEADING_CORRECTION_KD * (-gyroRate);
+  
+  float output = P + I + D;
+  
+  // Allow larger corrections
+  output = constrain(output, -3.0f, 3.0f);
+  
+  headingPrevError = error;
+  
+  // Store for debug
+  lastHeadingError = error;
+  lastHeadingCorrection = output;
+  
+  return output;
+}
+
 void diffDriveController(float v, float w) {
   float L = WHEEL_SEPARATION_M;
+  
+  // Heading lock
+  if (headingLockEnabled && fabs(v) > 0.005f) {
+    float heading = yawFiltered;
+    
+    // Always correct unless we're intentionally turning hard
+    if (fabs(w) < 0.5f) {
+      float correction = headingCorrectionPID(targetHeading, heading, gyro_z, 0.05f);
+      
+      // Apply full correction
+      w = w + correction;
+      
+      // Allow more correction range
+      w = constrain(w, -2.0f, 2.0f);
+      
+      // Debug output
+      if (millis() - lastDebugPrint > 500) {
+        Serial.print("Heading error: ");
+        Serial.print(lastHeadingError * 180.0 / PI);
+        Serial.print(" deg, Correction: ");
+        Serial.print(lastHeadingCorrection);
+        Serial.print(" rad/s, W: ");
+        Serial.println(w);
+        lastDebugPrint = millis();
+      }
+    } else {
+      headingIntegral = 0;
+    }
+  }
+  
   float vl_target = v - (w * L) / 2.0f;
   float vr_target = v + (w * L) / 2.0f;
   
   vl_target = constrain(vl_target, -max_speed, max_speed);
   vr_target = constrain(vr_target, -max_speed, max_speed);
-
+  
   setVelocity(vl_target, vr_target);
 }
 
@@ -245,6 +349,8 @@ void resetPID() {
   integralVr = 0;
   outputVl = 0;
   outputVr = 0;
+  headingIntegral = 0;
+  headingPrevError = 0;
 }
 
 void setMotors(int leftPwm, int rightPwm) {
@@ -371,6 +477,9 @@ void updatePID() {
 
 void setup() {
   Serial.begin(115200);
+  Wire.begin(I2C_SDA, I2C_SCL);
+  mpu6050.begin();
+  mpu6050.calcGyroOffsets(true);
 
   pinMode(LEFT_DIR, OUTPUT);
   pinMode(RIGHT_DIR, OUTPUT);
@@ -391,22 +500,24 @@ void setup() {
   rampedVr = 0;
   lastRampTime = millis();
   
-  Serial.println("Robot ready - Differential Drive Controller");
+  targetHeading = yawFiltered;
+  
+  Serial.println("Robot ready - Heading lock ENABLED (AGGRESSIVE MODE)");
   Serial.println("Commands:");
   Serial.println("  D<V>,<W> - Set linear (m/s) and angular (rad/s) velocities");
-  Serial.println("  V<velL>,<velR> - Set individual wheel velocities");
-  Serial.println("  S - Stop motors");
-  Serial.println("  M<pwmL>,<pwmR> - Manual PWM control");
-  Serial.println("  P - Print current pose");
-  Serial.println();
-  Serial.println("Examples:");
-  Serial.println("  D0.2,0.0   - Drive forward at 0.2 m/s");
-  Serial.println("  D0.0,0.5   - Turn in place at 0.5 rad/s");
-  Serial.println("  D0.2,0.3   - Drive forward while turning right");
+  Serial.println("  H - Toggle heading lock");
+  Serial.println("  S - Stop");
+  Serial.println("  P - Print pose");
+  Serial.println("  Y - Print MPU data");
 }
 
 void loop() {
   unsigned long now = millis();
+
+  if (now - lastMPURead >= 10) {
+    getMpuData();
+    lastMPURead = now;
+  }
 
   if (now - lastSpeedMeasure >= samplerate) {
     float dt = (now - lastSpeedMeasure) / 1000.0f;
@@ -447,6 +558,16 @@ void loop() {
         float w = cmd.substring(commaIndex + 1).toFloat();
         V = v;
         W = w;
+        
+        if (headingLockEnabled && fabs(v) > 0.005f) {
+          targetHeading = yawFiltered;
+          headingIntegral = 0;
+          headingPrevError = 0;
+          Serial.print("Heading locked at: ");
+          Serial.print(targetHeading * 180.0 / PI);
+          Serial.println(" deg");
+        }
+        
         diffDriveController(v, w);
         Serial.print("Differential drive: V=");
         Serial.print(v);
@@ -483,14 +604,38 @@ void loop() {
         Serial.println(" m/s");
       }
     }
+    else if (cmd.equalsIgnoreCase("H")) {
+      headingLockEnabled = !headingLockEnabled;
+      if (headingLockEnabled) {
+        targetHeading = yawFiltered;
+        headingIntegral = 0;
+        headingPrevError = 0;
+        Serial.println("Heading lock ENABLED");
+      } else {
+        Serial.println("Heading lock DISABLED");
+      }
+    }
+    else if (cmd.equalsIgnoreCase("Y")) {
+      Serial.print("Yaw: ");
+      Serial.print(yaw * 180.0 / PI);
+      Serial.print(" deg, Filtered: ");
+      Serial.print(yawFiltered * 180.0 / PI);
+      Serial.print(" deg, Gyro Z: ");
+      Serial.print(gyro_z * 180.0 / PI);
+      Serial.println(" deg/s");
+      Serial.print("Heading lock: ");
+      Serial.println(headingLockEnabled ? "ENABLED" : "DISABLED");
+      Serial.print("Target heading: ");
+      Serial.println(targetHeading * 180.0 / PI);
+    }
     else if (cmd.equalsIgnoreCase("P")) {
-      // Print current pose
       Serial.print("Pose: x=");
       Serial.print(x);
       Serial.print(" y=");
       Serial.print(y);
       Serial.print(" theta=");
-      Serial.println(theta);
+      Serial.print(theta * 180.0 / PI);
+      Serial.println(" deg");
     }
     else if (cmd.equalsIgnoreCase("S")) {
       setMotors(0, 0);
