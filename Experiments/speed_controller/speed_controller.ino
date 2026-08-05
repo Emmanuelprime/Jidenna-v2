@@ -25,11 +25,17 @@
 
 #define FILTER_ALPHA 0.3f
 
-// Feed-forward calibration - works for both positive and negative speeds
-#define LEFT_SLOPE     0.0411f
-#define LEFT_INTERCEPT -0.2392f
-#define RIGHT_SLOPE     0.0267f
-#define RIGHT_INTERCEPT -0.0816f
+// Forward calibration
+#define LEFT_SLOPE_FWD     0.0411f
+#define LEFT_INTERCEPT_FWD -0.2392f
+#define RIGHT_SLOPE_FWD    0.0267f
+#define RIGHT_INTERCEPT_FWD -0.0816f
+
+// Reverse calibration (swapped characteristics)
+#define LEFT_SLOPE_REV     0.0267f   // Left reverse = Right forward
+#define LEFT_INTERCEPT_REV -0.0816f
+#define RIGHT_SLOPE_REV    0.0411f   // Right reverse = Left forward
+#define RIGHT_INTERCEPT_REV -0.2392f
 
 // Gain scheduling (uses absolute speed for both directions)
 #define KP_L_LOW  5.0f
@@ -56,7 +62,7 @@
 #define MIN_START_PWM 10
 #define MAX_ACCELERATION 0.3f
 
-// Low speed mapping - works for both positive and negative
+
 #define LOW_SPEED_PWM_PER_MPS 30.0f
 #define LOW_SPEED_THRESHOLD 0.3f
 
@@ -283,7 +289,7 @@ void updateVelocityRamping() {
   lastRampTime = now;
 }
 
-int calculateFeedForward(float targetSpeed) {
+int calculateFeedForward(float targetSpeed, bool isLeft) {
   if (fabs(targetSpeed) <= 0.01f) return 0;
   
   float absSpeed = fabs(targetSpeed);
@@ -297,9 +303,29 @@ int calculateFeedForward(float targetSpeed) {
     return constrain(pwm * sign, -MAX_PWM, MAX_PWM);
   }
   
-  // Use the appropriate slope based on direction
-  // For reverse, use the same mapping but with sign
-  int pwm = (int)((absSpeed - LEFT_INTERCEPT) / LEFT_SLOPE);
+  // Direction-specific calibration
+  float slope, intercept;
+  
+  if (isLeft) {
+    if (sign > 0) {
+      slope = LEFT_SLOPE_FWD;
+      intercept = LEFT_INTERCEPT_FWD;
+    } else {
+      slope = LEFT_SLOPE_REV;
+      intercept = LEFT_INTERCEPT_REV;
+    }
+  } else {
+
+    if (sign > 0) {
+      slope = RIGHT_SLOPE_FWD;
+      intercept = RIGHT_INTERCEPT_FWD;
+    } else {
+      slope = RIGHT_SLOPE_REV;
+      intercept = RIGHT_INTERCEPT_REV;
+    }
+  }
+  
+  int pwm = (int)((absSpeed - intercept) / slope);
   return constrain(pwm * sign, -MAX_PWM, MAX_PWM);
 }
 
@@ -311,7 +337,6 @@ void updatePID() {
   
   updateVelocityRamping();
   
-  // Update gains based on absolute speed (works for both directions)
   updateGains(rampedVl);
   updateGains(rampedVr);
   
@@ -321,8 +346,8 @@ void updatePID() {
   float pidOutputL = pidControl(rampedVl, currentVl, dt, kp_l, ki_l, kd_l, prevErrorVl, integralVl);
   float pidOutputR = pidControl(rampedVr, currentVr, dt, kp_r, ki_r, kd_r, prevErrorVr, integralVr);
   
-  int ffL = calculateFeedForward(rampedVl);
-  int ffR = calculateFeedForward(rampedVr);
+  int ffL = calculateFeedForward(rampedVl, true);
+  int ffR = calculateFeedForward(rampedVr, false);
   
   int leftPwm = constrain((int)(pidOutputL + ffL), -MAX_PWM, MAX_PWM);
   int rightPwm = constrain((int)(pidOutputR + ffR), -MAX_PWM, MAX_PWM);
@@ -354,7 +379,7 @@ void setup() {
   rampedVr = 0;
   lastRampTime = millis();
   
-  Serial.println("Robot ready - Bidirectional velocity control");
+  Serial.println("Robot ready - Direction-aware velocity control");
   Serial.println("Commands:");
   Serial.println("  V<velL>,<velR> - Set target velocities in m/s (negative for reverse)");
   Serial.println("  S - Stop motors");
