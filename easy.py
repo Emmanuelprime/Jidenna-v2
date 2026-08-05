@@ -4,7 +4,7 @@
 import serial
 import time
 
-PORT = '/dev/ttyUSB0'
+PORT = 'C'
 BAUD = 115200
 
 ser = serial.Serial(PORT, BAUD, timeout=1)

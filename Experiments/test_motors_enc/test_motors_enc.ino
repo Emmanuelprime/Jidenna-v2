@@ -5,7 +5,7 @@
 #define LEFT_DIR     23
 #define LEFT_SC      34
 
-#define RIGHT_PWM    27
+#define RIGHT_PWM    19
 #define RIGHT_DIR    26
 #define RIGHT_SC     35
 
@@ -17,7 +17,7 @@
 #define MAX_PWM       60
 
 // Encoder settings
-#define DEBOUNCE_TIME_US   1000
+#define DEBOUNCE_TIME_US   100
 #define ENCODER_PRINT_INTERVAL 100 // Print every 100ms
 
 #define LEFT_FORWARD   HIGH
