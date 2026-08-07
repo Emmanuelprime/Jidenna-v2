@@ -2,15 +2,17 @@
 #include <MPU6050_tockn.h>
 #include <Wire.h>
 
+// Define custom I2C pins for MPU6050
+#define I2C_SDA 32
+#define I2C_SCL 33
+
+// Motor control pins
 #define LEFT_PWM     22
 #define LEFT_DIR     23
 #define LEFT_SC      34
 #define RIGHT_PWM    19
 #define RIGHT_DIR    26
 #define RIGHT_SC     35
-
-#define I2C_SDA 32
-#define I2C_SCL 33
 
 #define LEFT_PWM_CH   2
 #define RIGHT_PWM_CH  1
@@ -30,107 +32,58 @@
 
 #define FILTER_ALPHA 0.3f
 
-// ─── HEADING CONTROL FROM WORKING CODE ────────────────────────────────────
-#define HEADING_DEADZONE_DEG  0.3f
-#define YAW_FILTER_ALPHA  0.92f
+// Forward calibration
+#define LEFT_SLOPE_FWD     0.0411f
+#define LEFT_INTERCEPT_FWD -0.2392f
+#define RIGHT_SLOPE_FWD    0.0267f
+#define RIGHT_INTERCEPT_FWD -0.0816f
 
-// ─── PID GAINS FROM WORKING CODE ──────────────────────────────────────────
-#define KP_HEADING 1.2f
-#define KI_HEADING 0.01f
-#define KD_HEADING 0.08f
+// Reverse calibration
+#define LEFT_SLOPE_REV     0.0267f
+#define LEFT_INTERCEPT_REV -0.0816f
+#define RIGHT_SLOPE_REV    0.0411f
+#define RIGHT_INTERCEPT_REV -0.2392f
 
-#define KP_TURN_RATE 1.8f
-#define KI_TURN_RATE 0.03f
-#define KD_TURN_RATE 0.08f
+// PID gains (increased for better response)
+#define KP_L_LOW  8.0f
+#define KI_L_LOW  0.08f
+#define KD_L_LOW  0.02f
+#define KP_R_LOW  8.5f
+#define KI_R_LOW  0.08f
+#define KD_R_LOW  0.02f
 
-#define KP_LEFT  1.8f   
-#define KI_LEFT  0.02f  
-#define KD_LEFT  0.15f  
+#define KP_L_MED  3.0f
+#define KI_L_MED  0.15f
+#define KD_L_MED  0.05f
+#define KP_R_MED  3.5f
+#define KI_R_MED  0.15f
+#define KD_R_MED  0.05f
 
-#define KP_RIGHT 2.5f   
-#define KI_RIGHT 0.03f  
-#define KD_RIGHT 0.20f  
-
-#define COMPLEMENTARY_ALPHA 0.98f
-
-MPU6050 mpu6050(Wire);
-
-// Forward calibration - from your working code
-#define LEFT_FWD_SLOPE     0.0209f
-#define LEFT_FWD_INTERCEPT -0.0167f
-#define RIGHT_FWD_SLOPE    0.0209f
-#define RIGHT_FWD_INTERCEPT -0.0167f
-
-#define LEFT_DEADZONE 10
-#define RIGHT_DEADZONE 10
-
-#define CONTROL_INTERVAL 50
-#define SAMPLE_TIME 0.05f
-
-// Gain scheduling
-#define KP_L_LOW  5.0f
-#define KI_L_LOW  0.05f
-#define KD_L_LOW  0.01f
-#define KP_R_LOW  5.5f
-#define KI_R_LOW  0.05f
-#define KD_R_LOW  0.01f
-
-#define KP_L_MED  1.5f
-#define KI_L_MED  0.10f
-#define KD_L_MED  0.03f
-#define KP_R_MED  2.0f
-#define KI_R_MED  0.12f
-#define KD_R_MED  0.03f
-
-#define KP_L_HIGH 1.0f
-#define KI_L_HIGH 0.15f
-#define KD_L_HIGH 0.05f
-#define KP_R_HIGH 1.5f
-#define KI_R_HIGH 0.18f
-#define KD_R_HIGH 0.05f
+#define KP_L_HIGH 2.0f
+#define KI_L_HIGH 0.20f
+#define KD_L_HIGH 0.08f
+#define KP_R_HIGH 2.5f
+#define KI_R_HIGH 0.20f
+#define KD_R_HIGH 0.08f
 
 #define MIN_START_PWM 10
-#define MAX_ACCELERATION 0.3f
+#define MAX_ACCELERATION 0.5f  // Increased for faster response
 #define LOW_SPEED_PWM_PER_MPS 30.0f
 #define LOW_SPEED_THRESHOLD 0.3f
 
+// MPU6050 compensation parameters (improved)
+#define YAW_COMPENSATION_KP 1.2f   // Increased for stronger correction
+#define YAW_COMPENSATION_KI 0.15f  // Increased integral
+#define YAW_COMPENSATION_KD 0.05f  // Increased derivative
+#define MAX_YAW_CORRECTION 0.3f    // Increased max correction
+#define YAW_DEADZONE 0.02f         // Ignore small yaw errors
+
+MPU6050 mpu6050(Wire);
+
+// Global variables
 float x = 0.0;
 float y = 0.0;
 float theta = 0.0;
-
-float V = 0.0;
-float W = 0.0;
-float max_speed = 0.8f;
-float yaw = 0.0;
-float yawFiltered = 0.0;
-float gyro_z = 0.0;
-
-// ─── HEADING CONTROL VARIABLES FROM WORKING CODE ──────────────────────────
-float headingIntegral = 0;
-float headingPrevError = 0;
-float targetHeading = 0;
-bool headingInitialized = false;
-float currentYaw = 0;
-float filteredYaw = 0;
-
-// ─── TURN RATE CONTROL ──────────────────────────────────────────────────────
-float turnRateIntegral = 0;
-float turnRatePrevError = 0;
-float actualAngularVelocity = 0;
-float filteredAngularVelocity = 0;
-float previousYaw = 0;
-unsigned long lastYawTime = 0;
-bool turnRateControlActive = false;
-
-float rampedV = 0.0;
-float rampedW = 0.0;
-
-bool headingLockEnabled = true;
-bool pidEnabled = true;
-
-// Debug
-float lastHeadingError = 0.0;
-float lastHeadingCorrection = 0.0;
 
 unsigned long samplerate = 50;
 
@@ -141,6 +94,8 @@ float filteredVr = 0.0;
 
 float targetVl = 0.0;
 float targetVr = 0.0;
+float rampedVl = 0.0;
+float rampedVr = 0.0;
 
 float prevErrorVl = 0.0;
 float integralVl = 0.0;
@@ -152,6 +107,15 @@ float outputVr = 0.0;
 float kp_l, ki_l, kd_l;
 float kp_r, ki_r, kd_r;
 
+// Yaw control variables
+float targetYaw = 0.0f;
+float prevYawError = 0.0f;
+float integralYaw = 0.0f;
+bool yawLocked = false;
+float initialYaw = 0.0f;
+float yawFiltered = 0.0f;  // Filtered yaw for stability
+
+// Encoder variables
 volatile long lastLeftPulses = 0;
 volatile long lastRightPulses = 0;
 volatile long leftPulses = 0;
@@ -167,131 +131,24 @@ unsigned long lastEncoderPrint = 0;
 unsigned long lastSpeedMeasure = 0;
 unsigned long lastPIDTime = 0;
 unsigned long lastRampTime = 0;
-unsigned long lastMPURead = 0;
-unsigned long lastDebugPrint = 0;
+unsigned long lastMPUUpdate = 0;
+unsigned long yawLockTime = 0;
 
-// ─── SOFT DEADZONE ──────────────────────────────────────────────────────────
-float softDeadzone(float error, float threshold) {
-  if (abs(error) < threshold) {
-    return error * (abs(error) / threshold);
-  }
-  return error;
-}
-
-// ─── EXPONENTIAL MOVING AVERAGE ────────────────────────────────────────────
-float expMovingAverage(float newValue, float prevValue, float alpha) {
-  return alpha * newValue + (1.0f - alpha) * prevValue;
-}
-
-// ─── HEADING PID FROM WORKING CODE ─────────────────────────────────────────
-float computeHeadingPID(float target, float current, float dt) {
-  float error = target - current;
-  
-  while (error > 180) error -= 360;
-  while (error < -180) error += 360;
-  
-  error = softDeadzone(error, HEADING_DEADZONE_DEG);
-  
-  headingIntegral += error * dt;
-  headingIntegral = constrain(headingIntegral, -5.0, 5.0);
-  
-  float derivative = (error - headingPrevError) / dt;
-  float output = KP_HEADING * error + KI_HEADING * headingIntegral + KD_HEADING * derivative;
-  
-  headingPrevError = error;
-  
-  lastHeadingError = error;
-  lastHeadingCorrection = output;
-  
-  return constrain(output, -0.3f, 0.3f);
-}
-
-// ─── TURN RATE PID FROM WORKING CODE ──────────────────────────────────────
-float computeTurnRatePID(float target, float current, float dt) {
-  float error = target - current;
-  
-  error = softDeadzone(error, 0.015f);
-  
-  turnRateIntegral += error * dt;
-  turnRateIntegral = constrain(turnRateIntegral, -0.5, 0.5);
-  
-  float derivative = (error - turnRatePrevError) / dt;
-  float output = KP_TURN_RATE * error + KI_TURN_RATE * turnRateIntegral + KD_TURN_RATE * derivative;
-  
-  turnRatePrevError = error;
-  
-  return constrain(output, -1.0, 1.0);
-}
-
-void getMpuData() {
-  mpu6050.update();
-  
-  currentYaw = mpu6050.getAngleZ();
-  gyro_z = mpu6050.getGyroZ() * PI / 180.0;
-  
-  // Use the same filtering as working code
-  filteredYaw = expMovingAverage(currentYaw, filteredYaw, YAW_FILTER_ALPHA);
-  
-  // Calculate angular velocity from yaw delta
-  static float prevYaw = 0;
-  static unsigned long prevYawTime = 0;
-  unsigned long now = micros();
-  float dt = (now - prevYawTime) / 1000000.0f;
-  if (dt > 0.001 && dt < 0.1) {
-    float yawDelta = currentYaw - prevYaw;
-    while (yawDelta > 180) yawDelta -= 360;
-    while (yawDelta < -180) yawDelta += 360;
-    filteredAngularVelocity = expMovingAverage(yawDelta / dt * (PI / 180.0), filteredAngularVelocity, 0.5f);
-  }
-  prevYaw = currentYaw;
-  prevYawTime = now;
-  
-  yaw = currentYaw * PI / 180.0;
-  yawFiltered = filteredYaw * PI / 180.0;
-}
-
-void diffDriveController(float v, float w, float dt) {
-  float L = WHEEL_SEPARATION_M;
-  
-  float headingCorrection = 0;
-  float turnRateCorrection = 0;
-  
-  // ─── HEADING CORRECTION (same as working code) ──────────────────────────
-  if (headingLockEnabled && headingInitialized && abs(v) > 0.02 && abs(w) < 0.01) {
-    headingCorrection = computeHeadingPID(targetHeading, filteredYaw, dt);
-  }
-  
-  // ─── TURN RATE CORRECTION (same as working code) ────────────────────────
-  if (abs(w) > 0.01) {
-    turnRateControlActive = true;
-    turnRateCorrection = computeTurnRatePID(w, filteredAngularVelocity, dt);
-  } else {
-    turnRateControlActive = false;
-  }
-  
-  // Combine corrections (same weighting as working code)
-  float effectiveOmega = w + headingCorrection * 0.8f + turnRateCorrection * 0.8f;
-  
-  // Debug output
-  if (millis() - lastDebugPrint > 500 && headingLockEnabled) {
-    Serial.print("Heading error: ");
-    Serial.print(lastHeadingError);
-    Serial.print(" deg, Correction: ");
-    Serial.print(headingCorrection);
-    Serial.print(" rad/s, Effective W: ");
-    Serial.println(effectiveOmega);
-    lastDebugPrint = millis();
-  }
-  
-  float vl_target = v - (effectiveOmega * L) / 2.0f;
-  float vr_target = v + (effectiveOmega * L) / 2.0f;
-  
-  vl_target = constrain(vl_target, -max_speed, max_speed);
-  vr_target = constrain(vr_target, -max_speed, max_speed);
-  
-  targetVl = vl_target;
-  targetVr = vr_target;
-}
+// Function prototypes
+void normalizeAngle();
+void updateOdometry();
+void IRAM_ATTR leftISR();
+void IRAM_ATTR rightISR();
+void MeasureWheelSpeeds(float dt);
+void updateGains(float speed);
+float pidControl(float target, float current, float dt, float kp, float ki, float kd, float &prevError, float &integral);
+void resetPID();
+void setMotors(int leftPwm, int rightPwm);
+void setVelocity(float targetLeft, float targetRight);
+void updateVelocityRamping();
+int calculateFeedForward(float targetSpeed, bool isLeft);
+void updatePID();
+void applyYawCompensation();
 
 void normalizeAngle() {
   while (theta > PI) theta -= 2 * PI;
@@ -397,10 +254,7 @@ float pidControl(float target, float current, float dt, float kp, float ki, floa
   
   float P = kp * error;
   
-  // Only integrate when error is small (anti-windup from working code)
-  if (abs(error) < 0.5) {
-    integral += error * dt;
-  }
+  integral += error * dt;
   integral = constrain(integral, -MAX_PWM/4, MAX_PWM/4);
   float I = ki * integral;
   
@@ -419,10 +273,6 @@ void resetPID() {
   integralVr = 0;
   outputVl = 0;
   outputVr = 0;
-  headingIntegral = 0;
-  headingPrevError = 0;
-  turnRateIntegral = 0;
-  turnRatePrevError = 0;
 }
 
 void setMotors(int leftPwm, int rightPwm) {
@@ -451,6 +301,25 @@ void setMotors(int leftPwm, int rightPwm) {
 void setVelocity(float targetLeft, float targetRight) {
   targetVl = targetLeft;
   targetVr = targetRight;
+  resetPID();
+  
+  // Lock yaw when moving straight
+  if (fabs(targetLeft - targetRight) < 0.01f && fabs(targetLeft) > 0.01f) {
+    // Wait for stable yaw reading
+    delay(50);
+    mpu6050.update();
+    targetYaw = mpu6050.getAngleZ();
+    initialYaw = targetYaw;
+    yawFiltered = targetYaw;
+    prevYawError = 0;
+    integralYaw = 0;
+    yawLocked = true;
+    yawLockTime = millis();
+    Serial.print("Yaw locked at: ");
+    Serial.println(targetYaw);
+  } else {
+    yawLocked = false;
+  }
 }
 
 void updateVelocityRamping() {
@@ -459,16 +328,22 @@ void updateVelocityRamping() {
   
   if (dt <= 0) return;
   
-  if (fabs(rampedV - V) > 0.001f) {
+  if (fabs(rampedVl - targetVl) > 0.001f) {
     float step = MAX_ACCELERATION * dt;
-    if (rampedV < V) rampedV = fmin(rampedV + step, V);
-    else rampedV = fmax(rampedV - step, V);
+    if (rampedVl < targetVl) {
+      rampedVl = fmin(rampedVl + step, targetVl);
+    } else {
+      rampedVl = fmax(rampedVl - step, targetVl);
+    }
   }
   
-  if (fabs(rampedW - W) > 0.001f) {
-    float step = 2.0f * dt;
-    if (rampedW < W) rampedW = fmin(rampedW + step, W);
-    else rampedW = fmax(rampedW - step, W);
+  if (fabs(rampedVr - targetVr) > 0.001f) {
+    float step = MAX_ACCELERATION * dt;
+    if (rampedVr < targetVr) {
+      rampedVr = fmin(rampedVr + step, targetVr);
+    } else {
+      rampedVr = fmax(rampedVr - step, targetVr);
+    }
   }
   
   lastRampTime = now;
@@ -480,53 +355,161 @@ int calculateFeedForward(float targetSpeed, bool isLeft) {
   float absSpeed = fabs(targetSpeed);
   int sign = (targetSpeed > 0) ? 1 : -1;
   
-  // Use the working code's calibration
-  float pwm;
+  if (absSpeed < LOW_SPEED_THRESHOLD) {
+    int pwm = (int)(absSpeed * LOW_SPEED_PWM_PER_MPS);
+    if (pwm > 0 && pwm < MIN_START_PWM) {
+      pwm = MIN_START_PWM;
+    }
+    return constrain(pwm * sign, -MAX_PWM, MAX_PWM);
+  }
+  
+  float slope, intercept;
+  
   if (isLeft) {
-    pwm = (absSpeed - LEFT_FWD_INTERCEPT) / LEFT_FWD_SLOPE;
+    if (sign > 0) {
+      slope = LEFT_SLOPE_FWD;
+      intercept = LEFT_INTERCEPT_FWD;
+    } else {
+      slope = LEFT_SLOPE_REV;
+      intercept = LEFT_INTERCEPT_REV;
+    }
   } else {
-    pwm = (absSpeed - RIGHT_FWD_INTERCEPT) / RIGHT_FWD_SLOPE;
+    if (sign > 0) {
+      slope = RIGHT_SLOPE_FWD;
+      intercept = RIGHT_INTERCEPT_FWD;
+    } else {
+      slope = RIGHT_SLOPE_REV;
+      intercept = RIGHT_INTERCEPT_REV;
+    }
   }
   
-  // Apply deadzone
-  if (absSpeed > 0.01) {
-    pwm = max(pwm, (float)(isLeft ? LEFT_DEADZONE : RIGHT_DEADZONE));
-  } else {
-    pwm = 0;
-  }
-  
+  int pwm = (int)((absSpeed - intercept) / slope);
   return constrain(pwm * sign, -MAX_PWM, MAX_PWM);
+}
+
+void applyYawCompensation() {
+  if (!yawLocked) return;
+  
+  // Update MPU data
+  mpu6050.update();
+  float currentYaw = mpu6050.getAngleZ();
+  
+  // Apply low-pass filter to yaw
+  yawFiltered = 0.7f * yawFiltered + 0.3f * currentYaw;
+  
+  // Calculate yaw error
+  float yawError = targetYaw - yawFiltered;
+  
+  // Normalize yaw error to [-PI, PI]
+  while (yawError > PI) yawError -= 2 * PI;
+  while (yawError < -PI) yawError += 2 * PI;
+  
+  // Apply deadzone to prevent oscillation
+  if (fabs(yawError) < YAW_DEADZONE) {
+    yawError = 0;
+  }
+  
+  // PID control for yaw
+  static unsigned long lastYawTime = 0;
+  float dt = (millis() - lastYawTime) / 1000.0f;
+  if (dt <= 0) dt = 0.01f;
+  if (dt > 0.1f) dt = 0.1f;  // Limit dt
+  
+  float P = YAW_COMPENSATION_KP * yawError;
+  
+  integralYaw += yawError * dt;
+  integralYaw = constrain(integralYaw, -0.3f, 0.3f);
+  float I = YAW_COMPENSATION_KI * integralYaw;
+  
+  float D = YAW_COMPENSATION_KD * (yawError - prevYawError) / dt;
+  
+  float yawCorrection = P + I + D;
+  yawCorrection = constrain(yawCorrection, -MAX_YAW_CORRECTION, MAX_YAW_CORRECTION);
+  
+  prevYawError = yawError;
+  lastYawTime = millis();
+  
+  // Apply correction to wheel velocities
+  // If robot yaws right (positive yaw), speed up left wheel or slow down right
+  float leftCorrection = -yawCorrection / 2.0f;
+  float rightCorrection = yawCorrection / 2.0f;
+  
+  // Apply corrections to target velocities
+  float adjustedVl = targetVl + leftCorrection;
+  float adjustedVr = targetVr + rightCorrection;
+  
+  // Ensure we maintain direction
+  if (targetVl > 0) {
+    adjustedVl = max(adjustedVl, 0.05f);
+  } else if (targetVl < 0) {
+    adjustedVl = min(adjustedVl, -0.05f);
+  }
+  
+  if (targetVr > 0) {
+    adjustedVr = max(adjustedVr, 0.05f);
+  } else if (targetVr < 0) {
+    adjustedVr = min(adjustedVr, -0.05f);
+  }
+  
+  // Update ramped velocities to use adjusted targets
+  rampedVl = adjustedVl;
+  rampedVr = adjustedVr;
 }
 
 void updatePID() {
   unsigned long now = millis();
   float dt = (now - lastPIDTime) / 1000.0f;
   
-  if (dt <= 0) dt = 0.05f;
+  if (dt <= 0) return;
+  if (dt > 0.1f) dt = 0.1f;  // Limit dt
   
-  updateGains(targetVl);
-  updateGains(targetVr);
+  // Apply yaw compensation
+  applyYawCompensation();
+  
+  // Update ramp if not yaw locked (yaw locked sets ramped velocities directly)
+  if (!yawLocked) {
+    updateVelocityRamping();
+  }
+  
+  updateGains(rampedVl);
+  updateGains(rampedVr);
   
   float currentVl = filteredVl;
   float currentVr = filteredVr;
   
-  float pidOutputL = pidControl(targetVl, currentVl, dt, kp_l, ki_l, kd_l, prevErrorVl, integralVl);
-  float pidOutputR = pidControl(targetVr, currentVr, dt, kp_r, ki_r, kd_r, prevErrorVr, integralVr);
+  float pidOutputL = pidControl(rampedVl, currentVl, dt, kp_l, ki_l, kd_l, prevErrorVl, integralVl);
+  float pidOutputR = pidControl(rampedVr, currentVr, dt, kp_r, ki_r, kd_r, prevErrorVr, integralVr);
   
-  int ffL = calculateFeedForward(targetVl, true);
-  int ffR = calculateFeedForward(targetVr, false);
+  int ffL = calculateFeedForward(rampedVl, true);
+  int ffR = calculateFeedForward(rampedVr, false);
   
   int leftPwm = constrain((int)(pidOutputL + ffL), -MAX_PWM, MAX_PWM);
   int rightPwm = constrain((int)(pidOutputR + ffR), -MAX_PWM, MAX_PWM);
   
   setMotors(leftPwm, rightPwm);
+  
+  lastPIDTime = now;
 }
 
 void setup() {
   Serial.begin(115200);
+
+  // Initialize MPU6050 with better calibration
   Wire.begin(I2C_SDA, I2C_SCL);
   mpu6050.begin();
+  
+  // Longer calibration with explicit messages
+  Serial.println("Calibrating MPU6050 gyro... Keep robot still!");
   mpu6050.calcGyroOffsets(true);
+  delay(1000);
+  
+  // Get initial yaw
+  mpu6050.update();
+  yawFiltered = mpu6050.getAngleZ();
+  targetYaw = yawFiltered;
+  Serial.println("MPU6050 initialized and calibrated");
+  Serial.print("Initial Yaw: ");
+  Serial.println(yawFiltered);
 
   pinMode(LEFT_DIR, OUTPUT);
   pinMode(RIGHT_DIR, OUTPUT);
@@ -543,34 +526,26 @@ void setup() {
 
   setMotors(0, 0);
   resetPID();
-  rampedV = 0;
-  rampedW = 0;
+  rampedVl = 0;
+  rampedVr = 0;
   lastRampTime = millis();
   
-  // Initialize heading
-  mpu6050.update();
-  currentYaw = mpu6050.getAngleZ();
-  filteredYaw = currentYaw;
-  targetHeading = currentYaw;
-  headingInitialized = true;
-  
-  Serial.println("Robot ready - Using proven heading control from working code");
+  Serial.println("Robot ready with improved MPU6050 yaw compensation");
   Serial.println("Commands:");
-  Serial.println("  D<V>,<W> - Set linear (m/s) and angular (rad/s) velocities");
-  Serial.println("  V<left>,<right> - Set individual wheel velocities");
+  Serial.println("  V<velL>,<velR> - Set target velocities in m/s");
+  Serial.println("  S - Stop motors");
   Serial.println("  M<pwmL>,<pwmR> - Manual PWM control");
-  Serial.println("  H - Toggle heading lock");
-  Serial.println("  S - Stop");
-  Serial.println("  P - Print pose");
-  Serial.println("  Y - Print MPU data");
+  Serial.println("  Y - Show current yaw angle");
+  Serial.println("  C - Re-calibrate MPU6050");
 }
 
 void loop() {
   unsigned long now = millis();
 
-  if (now - lastMPURead >= 10) {
-    getMpuData();
-    lastMPURead = now;
+  // Update MPU data at 100Hz for better response
+  if (now - lastMPUUpdate >= 10) {  // 100Hz
+    mpu6050.update();
+    lastMPUUpdate = now;
   }
 
   if (now - lastSpeedMeasure >= samplerate) {
@@ -580,14 +555,7 @@ void loop() {
   }
   
   if (now - lastPIDTime >= samplerate) {
-    float dt = (now - lastPIDTime) / 1000.0f;
-    
-    if (pidEnabled) {
-      updateVelocityRamping();
-      diffDriveController(rampedV, rampedW, dt);
-      updatePID();
-    }
-    lastPIDTime = now;
+    updatePID();
   }
 
   if (now - lastEncoderPrint >= ENCODER_PRINT_INTERVAL) {
@@ -602,9 +570,15 @@ void loop() {
     Serial.print(",");
     Serial.print(vr);
     Serial.print(",");
-    Serial.print(targetVl);
+    Serial.print(rampedVl);
     Serial.print(",");
-    Serial.println(targetVr);
+    Serial.print(rampedVr);
+    Serial.print(",");
+    Serial.print(yawFiltered);
+    Serial.print(",");
+    Serial.print(mpu6050.getAngleZ());
+    Serial.print(",");
+    Serial.println(yawLocked ? 1 : 0);
     lastEncoderPrint = now;
   }
 
@@ -612,57 +586,18 @@ void loop() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
 
-    if (cmd.startsWith("D") || cmd.startsWith("d")) {
-      int commaIndex = cmd.indexOf(',');
-      if (commaIndex > 0) {
-        float v = cmd.substring(1, commaIndex).toFloat();
-        float w = cmd.substring(commaIndex + 1).toFloat();
-        
-        pidEnabled = true;
-        resetPID();
-        
-        V = v;
-        W = w;
-        rampedV = v;
-        rampedW = w;
-        
-        if (headingLockEnabled && headingInitialized && abs(v) > 0.02) {
-          targetHeading = filteredYaw;
-          headingIntegral = 0;
-          headingPrevError = 0;
-          Serial.print("Heading locked at: ");
-          Serial.print(targetHeading);
-          Serial.println(" deg");
-        }
-        
-        Serial.print("Differential drive: V=");
-        Serial.print(v);
-        Serial.print(" m/s, W=");
-        Serial.print(w);
-        Serial.println(" rad/s");
-      }
-    }
-    else if (cmd.startsWith("M") || cmd.startsWith("m")) {
+    if (cmd.startsWith("M") || cmd.startsWith("m")) {
       int commaIndex = cmd.indexOf(',');
       if (commaIndex > 0) {
         int leftPwm = cmd.substring(1, commaIndex).toInt();
         int rightPwm = cmd.substring(commaIndex + 1).toInt();
-        
-        pidEnabled = false;
         setMotors(leftPwm, rightPwm);
-        
         resetPID();
-        V = 0;
-        W = 0;
-        rampedV = 0;
-        rampedW = 0;
         targetVl = 0;
         targetVr = 0;
-        
-        Serial.print("Manual PWM: L=");
-        Serial.print(leftPwm);
-        Serial.print(" R=");
-        Serial.println(rightPwm);
+        rampedVl = 0;
+        rampedVr = 0;
+        yawLocked = false;
       }
     }
     else if (cmd.startsWith("V") || cmd.startsWith("v")) {
@@ -670,66 +605,43 @@ void loop() {
       if (commaIndex > 0) {
         float leftVel = cmd.substring(1, commaIndex).toFloat();
         float rightVel = cmd.substring(commaIndex + 1).toFloat();
-        
-        pidEnabled = true;
-        
-        V = (rightVel + leftVel) / 2.0f;
-        W = (rightVel - leftVel) / WHEEL_SEPARATION_M;
-        rampedV = V;
-        rampedW = W;
-        
-        resetPID();
-        
-        Serial.print("Target velocity converted to: V=");
-        Serial.print(V);
-        Serial.print(" m/s, W=");
-        Serial.println(W);
+        setVelocity(leftVel, rightVel);
+        Serial.print("Target velocity: L=");
+        Serial.print(leftVel);
+        Serial.print(" m/s, R=");
+        Serial.print(rightVel);
+        Serial.println(" m/s");
       }
-    }
-    else if (cmd.equalsIgnoreCase("H")) {
-      headingLockEnabled = !headingLockEnabled;
-      if (headingLockEnabled) {
-        targetHeading = filteredYaw;
-        headingIntegral = 0;
-        headingPrevError = 0;
-        Serial.println("Heading lock ENABLED");
-      } else {
-        Serial.println("Heading lock DISABLED");
-      }
-    }
-    else if (cmd.equalsIgnoreCase("Y")) {
-      Serial.print("Yaw: ");
-      Serial.print(yaw * 180.0 / PI);
-      Serial.print(" deg, Filtered: ");
-      Serial.print(filteredYaw);
-      Serial.print(" deg, Gyro Z: ");
-      Serial.print(gyro_z * 180.0 / PI);
-      Serial.println(" deg/s");
-      Serial.print("Heading lock: ");
-      Serial.println(headingLockEnabled ? "ENABLED" : "DISABLED");
-      Serial.print("Target heading: ");
-      Serial.println(targetHeading);
-    }
-    else if (cmd.equalsIgnoreCase("P")) {
-      Serial.print("Pose: x=");
-      Serial.print(x);
-      Serial.print(" y=");
-      Serial.print(y);
-      Serial.print(" theta=");
-      Serial.print(theta * 180.0 / PI);
-      Serial.println(" deg");
     }
     else if (cmd.equalsIgnoreCase("S")) {
       setMotors(0, 0);
-      pidEnabled = true;
       resetPID();
       targetVl = 0;
       targetVr = 0;
-      V = 0;
-      W = 0;
-      rampedV = 0;
-      rampedW = 0;
+      rampedVl = 0;
+      rampedVr = 0;
+      yawLocked = false;
       Serial.println("Stopped");
+    }
+    else if (cmd.equalsIgnoreCase("Y")) {
+      Serial.print("Current Yaw: ");
+      Serial.print(mpu6050.getAngleZ());
+      Serial.print("  Filtered: ");
+      Serial.print(yawFiltered);
+      Serial.print("  Target: ");
+      Serial.print(targetYaw);
+      Serial.print("  Locked: ");
+      Serial.println(yawLocked ? "Yes" : "No");
+    }
+    else if (cmd.equalsIgnoreCase("C")) {
+      Serial.println("Re-calibrating MPU6050...");
+      mpu6050.calcGyroOffsets(true);
+      delay(1000);
+      mpu6050.update();
+      yawFiltered = mpu6050.getAngleZ();
+      targetYaw = yawFiltered;
+      Serial.print("New initial yaw: ");
+      Serial.println(yawFiltered);
     }
   }
 }

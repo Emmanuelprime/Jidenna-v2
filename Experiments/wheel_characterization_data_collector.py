@@ -2,7 +2,7 @@ import serial
 import time
 import csv
 
-ser = serial.Serial('COM19', 115200, timeout=1)
+ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
 time.sleep(2)
 
 csv_file = open('motor_data.csv', 'a', newline='')
@@ -47,7 +47,7 @@ while True:
                     print(f"Sending: {cmd_str.strip()}")
                     
                     start = time.time()
-                    while time.time() - start < 5:
+                    while time.time() - start < 3:
                         if ser.in_waiting:
                             line = ser.readline().decode().strip()
                             if line:
