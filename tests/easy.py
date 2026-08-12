@@ -20,19 +20,21 @@ try:
         if cmd.upper() == 'Q':
             break
         
-        # Send the command
-        ser.write(f"{cmd}\n".encode())
-        print(f"Sent: {cmd}")
+        print(f"Sending: {cmd} for 5 seconds...")
         
-        # Keep sending for 5 seconds
+        # Keep sending the command every 0.5 seconds for 5 seconds
         start_time = time.time()
         while time.time() - start_time < 5:
+            # Send the command again
+            ser.write(f"{cmd}\n".encode())
+            
             # Read and print any responses
             while ser.in_waiting:
                 line = ser.readline().decode().strip()
                 if line:
                     print(f"  {line}")
-            time.sleep(0.1)
+            
+            time.sleep(0.5)  # Send every 500ms to prevent timeout
         
         # Stop after 5 seconds
         print("Stopping...")
