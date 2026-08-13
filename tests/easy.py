@@ -23,7 +23,7 @@ target_heading = 0.0     # Target heading angle (0 = straight ahead)
 kp_heading = 2.0         # Proportional gain for heading correction
 ki_heading = 0.1         # Integral gain
 kd_heading = 0.05        # Derivative gain
-
+command_interval = 0.1
 # PID variables
 integral_error = 0.0
 previous_error = 0.0
