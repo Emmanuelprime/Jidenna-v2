@@ -16,7 +16,7 @@ ser.reset_input_buffer()
 
 # Test parameters
 linear_velocity = 0.2    # m/s (desired forward speed)
-duration = 5.0           # seconds
+duration = 10.0           # seconds
 
 # PID controller for heading correction
 target_heading = 0.0     # Target heading angle (0 = straight ahead)
