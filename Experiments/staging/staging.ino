@@ -54,6 +54,9 @@
 // Stop sequence timing
 #define STOP_HOLD_TIME 200  // Hold zero PWM for 200ms when stopping
 
+// Command timeout
+#define COMMAND_TIMEOUT_MS 500  // Stop if no command received within 500ms
+
 // Odometry variables
 float x = 0.0;
 float y = 0.0;
@@ -111,6 +114,7 @@ unsigned long lastOdometryUpdate = 0;
 unsigned long lastSpeedMeasure = 0;
 unsigned long lastPIDTime = 0;
 unsigned long lastRampTime = 0;
+unsigned long lastCommandTime = 0;  // Track when last command was received
 
 // Anti-windup and stopping sequence
 bool isStopping = false;
@@ -260,6 +264,9 @@ void setVW(float linearVel, float angularVel) {
   
   rawTargetVl = leftVel;
   rawTargetVr = rightVel;
+  
+  // Update command timestamp
+  lastCommandTime = millis();
 }
 
 void updateVelocityRamping() {
@@ -328,6 +335,20 @@ int calculateFeedForward(float targetSpeed, bool isLeft) {
 void updatePID() {
   unsigned long now = millis();
   
+  // Check for command timeout
+  if (!isStopping && (now - lastCommandTime > COMMAND_TIMEOUT_MS)) {
+    // No command received within timeout period, initiate stop sequence
+    isStopping = true;
+    stopStartTime = now;
+    setMotors(0, 0);
+    resetPID();
+    filteredVl = 0; filteredVr = 0;
+    vl = 0; vr = 0;
+    rawTargetVl = 0; rawTargetVr = 0;
+    targetVl = 0; targetVr = 0;
+    Serial.println("Command timeout - stopping");
+  }
+  
   // Stopping sequence
   if (isStopping) {
     if (now - stopStartTime < STOP_HOLD_TIME) {
@@ -392,9 +413,11 @@ void setup() {
   lastRampTime = millis();
   lastPIDTime = millis();
   lastOdometryUpdate = millis();
+  lastCommandTime = millis();  // Initialize command time
   
   Serial.println("Differential Drive Controller Ready");
-  Serial.println("Commands: V<linear>,<angular> (e.g., V0.2,0 for forward)");
+  Serial.println("Commands: V<linear_velocity>,<angular_velocity> (e.g., V0.2,0.1)");
+  Serial.println("Auto-stop after 500ms without commands");
 }
 
 void loop() {
@@ -432,20 +455,8 @@ void loop() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
 
-    if (cmd.startsWith("M") || cmd.startsWith("m")) {
-      // Direct motor control
-      int commaIndex = cmd.indexOf(',');
-      if (commaIndex > 0) {
-        int leftPwm = cmd.substring(1, commaIndex).toInt();
-        int rightPwm = cmd.substring(commaIndex + 1).toInt();
-        isStopping = false;
-        setMotors(leftPwm, rightPwm);
-        resetPID();
-        rawTargetVl = 0; rawTargetVr = 0;
-        targetVl = 0; targetVr = 0;
-      }
-    }
-    else if (cmd.startsWith("V") || cmd.startsWith("v")) {
+    // Only accept V,W commands
+    if (cmd.startsWith("V") || cmd.startsWith("v")) {
       // V,W command: V<linear_velocity>,<angular_velocity>
       int commaIndex = cmd.indexOf(',');
       if (commaIndex > 0) {
@@ -455,19 +466,6 @@ void loop() {
         setVW(linearVel, angularVel);
       }
     }
-    else if (cmd.equalsIgnoreCase("S")) {
-      // Stop command
-      isStopping = true;
-      stopStartTime = millis();
-      setMotors(0, 0);
-      resetPID();
-      filteredVl = 0; filteredVr = 0;
-      vl = 0; vr = 0;
-      rawTargetVl = 0; rawTargetVr = 0;
-      targetVl = 0; targetVr = 0;
-      lastPIDTime = millis();
-      lastRampTime = millis();
-      Serial.println("Stopping...");
-    }
+    // All other commands are ignored
   }
 }
