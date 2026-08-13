@@ -1,74 +1,60 @@
-#!/usr/bin/env python3
-"""Simple Robot Controller - Send command for 5 seconds"""
-
 import serial
 import time
 
-PORT = '/dev/ttyUSB0'
-BAUD = 115200
+# Configure serial connection (adjust port as needed)
+ser = serial.Serial(
+    port='/dev/ttyUSB0',  # Change this to your port (e.g., '/dev/ttyUSB0' on Linux)
+    baudrate=115200,
+    timeout=1
+)
 
-ser = serial.Serial(PORT, BAUD, timeout=0.1)  # Reduced timeout
+# Give the Arduino time to initialize
 time.sleep(2)
+
+# Flush any existing data
 ser.reset_input_buffer()
 
-print("Ready. Commands: V0.2,0  V0,0.5  Q")
+# Test parameters
+linear_velocity = 0.2    # m/s
+angular_velocity = 0.1   # rad/s
+duration = 5.0           # seconds
 
-def send_command(ser, cmd):
-    """Send command to Arduino"""
-    ser.write(f"{cmd}\n".encode())
-    ser.flush()  # Ensure command is sent immediately
+print("Starting data collection...")
+print("Format: x, y, theta, vl, vr, mpu_z")
+
+start_time = time.time()
+command_interval = 0.1  # Send command every 100ms
+last_command_time = 0
 
 try:
-    while True:
-        cmd = input("> ").strip()
+    while (time.time() - start_time) < duration:
+        current_time = time.time()
         
-        if cmd.upper() == 'Q':
-            break
+        # Send command periodically to prevent timeout
+        if (current_time - last_command_time) >= command_interval:
+            command = f"V{linear_velocity},{angular_velocity}\n"
+            ser.write(command.encode())
+            last_command_time = current_time
         
-        # Validate command format
-        if not (cmd.startswith('V') or cmd.startswith('v')):
-            print("Invalid command. Use format: V<linear>,<angular> (e.g., V0.2,0)")
-            continue
+        # Read and print incoming data
+        if ser.in_waiting:
+            line = ser.readline().decode('utf-8').strip()
+            if line and ',' in line:  # Validate data line
+                print(f"Data: {line}")
+                # Parse and use data if needed
+                # values = line.split(',')
+                # x = float(values[0])
+                # y = float(values[1])
+                # theta = float(values[2])
+                # vl = float(values[3])
+                # vr = float(values[4])
+                # mpu_z = float(values[5])
         
-        print(f"Sending: {cmd} for 5 seconds...")
-        
-        # Keep sending the command for 5 seconds
-        start_time = time.time()
-        next_send_time = start_time
-        
-        while time.time() - start_time < 5:
-            current_time = time.time()
-            
-            # Send command every 100ms (10Hz - well within 500ms timeout)
-            if current_time >= next_send_time:
-                send_command(ser, cmd)
-                next_send_time = current_time + 0.1  # Send every 100ms
-            
-            # Read and print any responses (non-blocking)
-            while ser.in_waiting:
-                line = ser.readline().decode().strip()
-                if line:
-                    print(f"  {line}")
-            
-            # Small sleep to prevent CPU overload
-            time.sleep(0.01)
-        
-        # Stop after 5 seconds
-        print("Stopping...")
-        send_command(ser, "V0,0")
-        time.sleep(0.5)
-        
-        # Print any final messages
-        while ser.in_waiting:
-            line = ser.readline().decode().strip()
-            if line:
-                print(f"  {line}")
+        time.sleep(0.01)  # Small delay to prevent CPU overload
 
-except KeyboardInterrupt:
-    print("\nInterrupted by user")
-    
 finally:
-    send_command(ser, "V0,0")  # Stop the robot
+    # Stop the robot
+    ser.write(b"V0,0\n")
     time.sleep(0.1)
     ser.close()
-    print("Done")
+    print("\nData collection complete. Robot stopped.")
