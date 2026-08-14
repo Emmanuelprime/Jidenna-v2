@@ -13,23 +13,28 @@ heading_controller = HeadingController()
 path_follower = PathFollower(robot, heading_controller)
 trajectory_gen = TrajectoryGenerator()
 
-# Generate square trajectory with more points for smoother path
+# Generate square with just the corners (4 waypoints + start)
 print("Generating square trajectory...")
 square_path = trajectory_gen.generate_square(
     side_length=1.0,
     start=(0, 0),
-    num_points_per_side=10
+    num_points_per_side=2  # Just corners
 )
 
-print(f"Generated {len(square_path)} trajectory points")
-print(f"First point: {square_path[0]}")
-print(f"Last point: {square_path[-1]}")
+# Extract unique waypoints (remove duplicates)
+waypoints = []
+for point in square_path:
+    if not waypoints or waypoints[-1] != point:
+        waypoints.append(point)
 
-# Use all trajectory points as waypoints
-path_follower.set_waypoints(square_path)
+print(f"Using {len(waypoints)} waypoints:")
+for i, wp in enumerate(waypoints):
+    print(f"  Waypoint {i+1}: ({wp[0]:.2f}, {wp[1]:.2f})")
+
+path_follower.set_waypoints(waypoints)
 
 try:
-    path_follower.follow_path(speed=0.15)  # Slower for dense trajectory
+    path_follower.follow_path(speed=0.2)
 except KeyboardInterrupt:
     print("\nInterrupted")
 finally:
