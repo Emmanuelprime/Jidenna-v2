@@ -28,9 +28,9 @@ command_interval = 0.05
 
 # PID controller for heading correction
 target_heading = None
-kp_heading = 1.5
-ki_heading = 0.3
-kd_heading = 0.3
+kp_heading = 4.0       # Stronger proportional
+ki_heading = 0.8       # Stronger integral
+kd_heading = 0.3       # Moderate derivative
 
 # PID variables
 integral_error = 0.0
@@ -38,16 +38,23 @@ previous_error = 0.0
 previous_time = time.time()
 
 # Maximum angular velocity correction (rad/s)
-max_correction = 0.3
-min_correction = 0.01
+max_correction = 1.0   # Allow stronger correction
+min_correction = 0.005
 
 # Moving average filter for MPU readings
 mpu_history = []
-mpu_filter_size = 5
+mpu_filter_size = 3
 
 # Wheel speed calibration
-wheel_speed_diff_threshold = 0.03
+wheel_speed_diff_threshold = 0.015  # More sensitive
 feed_forward_correction = 0.0
+
+# Initialization
+initialization_samples = 10
+init_mpu_samples = []
+init_theta_samples = []
+init_vl_samples = []
+init_vr_samples = []
 
 print("="*80)
 print("STARTING STRAIGHT-LINE DRIVING WITH MPU CORRECTION")
@@ -57,8 +64,7 @@ print(f"Duration: {duration} seconds")
 print(f"PID Gains - Kp: {kp_heading}, Ki: {ki_heading}, Kd: {kd_heading}")
 print(f"Max correction: {max_correction} rad/s")
 print(f"Command interval: {command_interval*1000}ms")
-print(f"MPU filter size: {mpu_filter_size}")
-print("Waiting for first MPU reading...")
+print("Collecting initialization samples...")
 print("-"*80)
 
 start_time = time.time()
@@ -87,17 +93,12 @@ def compute_heading_correction(current_heading, dt):
     while heading_error < -math.pi:
         heading_error += 2 * math.pi
     
-    # Apply deadband to prevent hunting
-    if abs(heading_error) < 0.02:  # 1.15 degrees
-        heading_error = 0.0
-        integral_error *= 0.9  # Decay integral when in deadband
-    
     # PID calculation
     integral_error += heading_error * dt
     derivative_error = (heading_error - previous_error) / dt if dt > 0 else 0
     
     # Limit integral windup
-    integral_error = max(-0.5, min(0.5, integral_error))
+    integral_error = max(-2.0, min(2.0, integral_error))
     
     # Compute individual PID components
     p_term = kp_heading * heading_error
@@ -126,9 +127,10 @@ def calculate_feed_forward(vl, vr):
     
     speed_diff = vl - vr
     
+    # If left wheel is faster (positive diff), robot turns right
+    # Need negative angular velocity to correct (turn left)
     if abs(speed_diff) > wheel_speed_diff_threshold:
-        # Robot is drifting due to wheel speed mismatch
-        feed_forward_correction = speed_diff * 2.0
+        feed_forward_correction = -speed_diff * 5.0  # Stronger gain
         return True
     else:
         feed_forward_correction = 0.0
@@ -170,36 +172,53 @@ try:
                         # Apply moving average filter to MPU
                         mpu_z = filter_mpu(mpu_z_raw)
                         
-                        # Wait for initialization
+                        # Collect initialization samples
                         if not initialization_complete:
-                            if len(mpu_history) == mpu_filter_size:
-                                target_heading = mpu_z
+                            init_mpu_samples.append(mpu_z)
+                            init_theta_samples.append(theta)
+                            init_vl_samples.append(vl)
+                            init_vr_samples.append(vr)
+                            
+                            if len(init_mpu_samples) >= initialization_samples:
+                                # Calculate average initial values
+                                target_heading = sum(init_mpu_samples) / len(init_mpu_samples)
+                                avg_vl = sum(init_vl_samples) / len(init_vl_samples)
+                                avg_vr = sum(init_vr_samples) / len(init_vr_samples)
                                 initialization_complete = True
-                                print(f"\nTarget heading set to: {target_heading:.4f} rad ({target_heading*180/math.pi:.2f} deg)")
-                                print(f"Initial wheel speeds - Left: {vl:.3f}, Right: {vr:.3f}")
+                                
+                                print(f"\nInitialization complete after {len(init_mpu_samples)} samples")
+                                print(f"Target heading (avg MPU): {target_heading:.4f} rad ({target_heading*180/math.pi:.2f} deg)")
+                                print(f"Initial odometry theta: {sum(init_theta_samples)/len(init_theta_samples):.4f} rad")
+                                print(f"Initial wheel speeds - Left: {avg_vl:.3f}, Right: {avg_vr:.3f}")
+                                print(f"Initial speed difference: {avg_vl - avg_vr:.3f} m/s")
+                                if avg_vl > avg_vr:
+                                    print("Left wheel faster - robot will drift RIGHT")
+                                elif avg_vr > avg_vl:
+                                    print("Right wheel faster - robot will drift LEFT")
+                                else:
+                                    print("Wheels balanced")
                                 print("-"*120)
-                                continue
+                            
+                            continue
                         
-                        # Only compute correction if initialized
-                        if initialization_complete:
-                            # Calculate feed-forward based on wheel speed difference
-                            has_wheel_mismatch = calculate_feed_forward(vl, vr)
-                            
-                            # Compute heading correction
-                            angular_correction, heading_error, p_term, i_term, d_term = compute_heading_correction(mpu_z, dt)
-                            
-                            # Store data point
-                            data_points.append((current_time - start_time, x, y, theta, vl, vr, mpu_z, heading_error, angular_correction))
-                            
-                            # Send corrected command
-                            if (current_time - last_command_time) >= command_interval:
-                                command = f"V{linear_velocity},{angular_correction}\n"
-                                ser.write(command.encode())
-                                command_count += 1
-                                last_command_time = current_time
-                            
-                            # Print ALL data points in CSV format
-                            print(f"{current_time-start_time:.3f}, {x:.4f}, {y:.4f}, {theta:.4f}, {vl:.4f}, {vr:.4f}, {mpu_z:.4f}, {heading_error:.4f}, {p_term:.4f}, {i_term:.4f}, {d_term:.4f}, {feed_forward_correction:.4f}, {angular_correction:.4f}")
+                        # Calculate feed-forward based on wheel speed difference
+                        has_wheel_mismatch = calculate_feed_forward(vl, vr)
+                        
+                        # Compute heading correction
+                        angular_correction, heading_error, p_term, i_term, d_term = compute_heading_correction(mpu_z, dt)
+                        
+                        # Store data point
+                        data_points.append((current_time - start_time, x, y, theta, vl, vr, mpu_z, heading_error, angular_correction))
+                        
+                        # Send corrected command
+                        if (current_time - last_command_time) >= command_interval:
+                            command = f"V{linear_velocity},{angular_correction}\n"
+                            ser.write(command.encode())
+                            command_count += 1
+                            last_command_time = current_time
+                        
+                        # Print ALL data points in CSV format
+                        print(f"{current_time-start_time:.3f}, {x:.4f}, {y:.4f}, {theta:.4f}, {vl:.4f}, {vr:.4f}, {mpu_z:.4f}, {heading_error:.4f}, {p_term:.4f}, {i_term:.4f}, {d_term:.4f}, {feed_forward_correction:.4f}, {angular_correction:.4f}")
                     
             except ValueError as e:
                 print(f"Error parsing data: {e}")
@@ -249,13 +268,18 @@ finally:
             initial_y = data_points[0][2]
             final_y = data_points[-1][2]
             total_drift = final_y - initial_y
-            print(f"  Total Y drift: {total_drift:.3f} m over {elapsed_time:.1f}s")
+            drift_direction = "RIGHT" if total_drift < 0 else "LEFT"
+            print(f"  Total Y drift: {total_drift:.3f} m {drift_direction} over {elapsed_time:.1f}s")
             print(f"  Drift rate: {total_drift/elapsed_time*100:.1f} cm/s")
             
             # Calculate average wheel speed difference
             speed_diffs = [d[4] - d[5] for d in data_points]  # vl - vr
             avg_speed_diff = sum(speed_diffs) / len(speed_diffs) if speed_diffs else 0
             print(f"  Average wheel speed difference: {avg_speed_diff:.3f} m/s")
+            if avg_speed_diff > 0:
+                print(f"  Left wheel faster by {avg_speed_diff:.3f} m/s (causes RIGHT drift)")
+            else:
+                print(f"  Right wheel faster by {-avg_speed_diff:.3f} m/s (causes LEFT drift)")
             
             # Calculate heading statistics
             mpu_headings = [d[6] for d in data_points]
@@ -264,15 +288,6 @@ finally:
                 min_heading = min(mpu_headings)
                 avg_heading = sum(mpu_headings) / len(mpu_headings)
                 print(f"  MPU Heading - Max: {max_heading:.4f} rad, Min: {min_heading:.4f} rad, Avg: {avg_heading:.4f} rad")
-            
-            # Calculate correction statistics
-            corrections = [d[8] for d in data_points]
-            if corrections:
-                max_correction = max(corrections)
-                min_correction = min(corrections)
-                avg_correction = sum(corrections) / len(corrections)
-                print(f"  Corrections - Max: {max_correction:.4f}, Min: {min_correction:.4f}, Avg: {avg_correction:.4f} rad/s")
-    else:
-        print("  No data received - check connections")
+                print(f"  Heading range: {max_heading - min_heading:.4f} rad ({(max_heading - min_heading)*180/math.pi:.2f} deg)")
     
     print("\nRobot stopped.")
