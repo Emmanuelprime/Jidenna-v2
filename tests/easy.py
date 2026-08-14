@@ -24,13 +24,13 @@ print("Buffers cleared")
 # Test parameters
 linear_velocity = 0.2
 duration = 10.0
-command_interval = 0.05  # Reduced to 50ms for more responsive control
+command_interval = 0.05
 
-# PID controller for heading correction
-target_heading = None  # Will be set to initial MPU reading
-kp_heading = 5.0       # Increased from 2.0 for stronger correction
-ki_heading = 0.5       # Increased from 0.1 for better steady-state error correction
-kd_heading = 0.1       # Increased from 0.05 for better damping
+# PID controller for heading correction - CONSERVATIVE GAINS
+target_heading = None
+kp_heading = 1.5       # Reduced from 5.0 to prevent oscillation
+ki_heading = 0.3       # Reduced from 0.5 for slower integral buildup
+kd_heading = 0.3       # Increased for better damping
 
 # PID variables
 integral_error = 0.0
@@ -38,15 +38,12 @@ previous_error = 0.0
 previous_time = time.time()
 
 # Maximum angular velocity correction (rad/s)
-max_correction = 0.5   # Reduced to prevent oscillation
-min_correction = 0.005 # Reduced deadband
+max_correction = 0.3   # Reduced from 0.5 to prevent aggressive corrections
+min_correction = 0.01  # Slightly larger deadband to prevent hunting
 
-# Data collection variables
-data_points = []
-start_time = time.time()
-last_command_time = 0
-data_count = 0
-command_count = 0
+# Moving average filter for MPU readings
+mpu_history = []
+mpu_filter_size = 5
 
 print("="*80)
 print("STARTING STRAIGHT-LINE DRIVING WITH MPU CORRECTION")
@@ -56,8 +53,23 @@ print(f"Duration: {duration} seconds")
 print(f"PID Gains - Kp: {kp_heading}, Ki: {ki_heading}, Kd: {kd_heading}")
 print(f"Max correction: {max_correction} rad/s")
 print(f"Command interval: {command_interval*1000}ms")
+print(f"MPU filter size: {mpu_filter_size}")
 print("Waiting for first MPU reading...")
 print("-"*80)
+
+start_time = time.time()
+last_command_time = 0
+data_count = 0
+command_count = 0
+data_points = []
+
+def filter_mpu(new_value):
+    """Apply moving average filter to MPU readings"""
+    global mpu_history
+    mpu_history.append(new_value)
+    if len(mpu_history) > mpu_filter_size:
+        mpu_history.pop(0)
+    return sum(mpu_history) / len(mpu_history)
 
 def compute_heading_correction(current_heading, dt):
     """Compute angular velocity correction to maintain straight line"""
@@ -70,9 +82,17 @@ def compute_heading_correction(current_heading, dt):
     while heading_error < -math.pi:
         heading_error += 2 * math.pi
     
+    # Apply deadband to prevent hunting
+    if abs(heading_error) < 0.02:  # 1.15 degrees
+        heading_error = 0.0
+        integral_error *= 0.9  # Decay integral when in deadband
+    
     # PID calculation
     integral_error += heading_error * dt
     derivative_error = (heading_error - previous_error) / dt if dt > 0 else 0
+    
+    # Limit integral windup
+    integral_error = max(-0.5, min(0.5, integral_error))
     
     # Compute individual PID components
     p_term = kp_heading * heading_error
@@ -122,24 +142,27 @@ try:
                         theta = float(values[2])
                         vl = float(values[3])
                         vr = float(values[4])
-                        mpu_z = float(values[5])
+                        mpu_z_raw = float(values[5])
                         
-                        # Store data point
-                        data_points.append((current_time - start_time, x, y, mpu_z, vl, vr))
+                        # Apply moving average filter to MPU
+                        mpu_z = filter_mpu(mpu_z_raw)
                         
-                        # Set target heading on first data point
-                        if target_heading is None and data_count > 1:  # Wait for 2nd reading to stabilize
+                        # Set target heading on first data point (after filter has data)
+                        if target_heading is None and len(mpu_history) == mpu_filter_size:
                             target_heading = mpu_z
-                            print(f"\nTarget heading set to: {target_heading:.3f} rad ({target_heading*180/math.pi:.2f} deg)")
+                            print(f"\nTarget heading set to: {target_heading:.4f} rad ({target_heading*180/math.pi:.2f} deg)")
                             print("-"*80)
-                            continue  # Skip this iteration to establish baseline
+                            continue
                         
                         # Only compute correction if target is set
                         if target_heading is not None:
+                            # Store data point
+                            data_points.append((current_time - start_time, x, y, mpu_z, theta, vl, vr))
+                            
                             # Compute heading correction
                             angular_correction, heading_error, p_term, i_term, d_term = compute_heading_correction(mpu_z, dt)
                             
-                            # Send corrected command immediately if needed
+                            # Send corrected command
                             if (current_time - last_command_time) >= command_interval:
                                 command = f"V{linear_velocity},{angular_correction}\n"
                                 ser.write(command.encode())
@@ -150,7 +173,7 @@ try:
                             if data_count % 10 == 1:
                                 print(f"\n[Data #{data_count}] t={current_time-start_time:.2f}s")
                                 print(f"  Position: x={x:.3f}m, y={y:.3f}m")
-                                print(f"  MPU Z: {mpu_z:.4f} rad ({mpu_z*180/math.pi:.2f} deg)")
+                                print(f"  MPU Z (filtered): {mpu_z:.4f} rad ({mpu_z*180/math.pi:.2f} deg)")
                                 print(f"  Heading error: {heading_error:.4f} rad ({heading_error*180/math.pi:.2f} deg)")
                                 print(f"  PID - P: {p_term:.4f}, I: {i_term:.4f}, D: {d_term:.4f}")
                                 print(f"  Correction: {angular_correction:.4f} rad/s")
@@ -169,7 +192,7 @@ try:
             command_count += 1
             last_command_time = current_time
         
-        time.sleep(0.005)  # Reduced sleep for faster response
+        time.sleep(0.005)
 
 except KeyboardInterrupt:
     print("\n\nInterrupted by user!")
@@ -207,6 +230,11 @@ finally:
             total_drift = final_y - initial_y
             print(f"  Total Y drift: {total_drift:.3f} m over {elapsed_time:.1f}s")
             print(f"  Drift rate: {total_drift/elapsed_time*100:.1f} cm/s")
+            
+            # Calculate average wheel speed difference
+            speed_diffs = [abs(d[5] - d[6]) for d in data_points]
+            avg_speed_diff = sum(speed_diffs) / len(speed_diffs) if speed_diffs else 0
+            print(f"  Average wheel speed difference: {avg_speed_diff:.3f} m/s")
     else:
         print("  No data received - check connections")
     
