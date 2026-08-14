@@ -36,14 +36,14 @@ odometry_weight = 0.02
 gyro_filter_size = 5
 gyro_filter_buffer = deque(maxlen=gyro_filter_size)
 
-kp_heading = 2.0
-ki_heading = 0.3
-kd_heading = 0.1
+kp_heading = 3.5
+ki_heading = 0.6
+kd_heading = 0.15
 target_heading = None
 integral_error = 0.0
 previous_error = 0.0
-max_correction = 0.5
-min_correction = 0.01
+max_correction = 0.8
+min_correction = 0.005
 
 time_data = []
 theta_data = []
@@ -56,6 +56,8 @@ p_term_data = []
 i_term_data = []
 d_term_data = []
 heading_error_data = []
+vl_data = []
+vr_data = []
 
 def filter_gyro(gyro_rate):
     gyro_filter_buffer.append(gyro_rate)
@@ -97,10 +99,14 @@ def compute_correction(current_heading, dt):
     while heading_error < -math.pi:
         heading_error += 2 * math.pi
     
+    if abs(heading_error) < 0.01:
+        heading_error = 0.0
+        integral_error *= 0.95
+    
     integral_error += heading_error * dt
     derivative_error = (heading_error - previous_error) / dt if dt > 0 else 0
     
-    integral_error = max(-1.0, min(1.0, integral_error))
+    integral_error = max(-2.0, min(2.0, integral_error))
     
     p_term = kp_heading * heading_error
     i_term = ki_heading * integral_error
@@ -150,7 +156,7 @@ def plot_controller_data():
         print("No data to plot")
         return
     
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+    fig, axes = plt.subplots(4, 1, figsize=(12, 12))
     
     axes[0].plot(time_data, fused_heading_data, 'b-', label='Fused Heading', linewidth=2)
     if target_heading is not None:
@@ -176,6 +182,14 @@ def plot_controller_data():
     axes[2].set_title('Controller - PID Components and Control Signal')
     axes[2].legend()
     axes[2].grid(True)
+    
+    axes[3].plot(time_data, vl_data, 'b-', label='Left Wheel', linewidth=1)
+    axes[3].plot(time_data, vr_data, 'r-', label='Right Wheel', linewidth=1)
+    axes[3].set_xlabel('Time (s)')
+    axes[3].set_ylabel('Speed (m/s)')
+    axes[3].set_title('Wheel Speeds')
+    axes[3].legend()
+    axes[3].grid(True)
     
     plt.tight_layout()
     plt.show()
@@ -226,12 +240,15 @@ try:
                     i_term_data.append(i_term)
                     d_term_data.append(d_term)
                     heading_error_data.append(heading_error)
+                    vl_data.append(vl)
+                    vr_data.append(vr)
                     
                     print(f"t={elapsed:.2f}s, "
                           f"theta={theta:.3f}, "
                           f"fused={current_fused:.3f}, "
                           f"error={heading_error:.3f}, "
-                          f"corr={correction:.3f}")
+                          f"corr={correction:.3f}, "
+                          f"vl={vl:.2f}, vr={vr:.2f}")
         
         time.sleep(0.01)
 
