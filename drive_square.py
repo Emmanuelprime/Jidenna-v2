@@ -7,59 +7,41 @@ import math
 robot = Jidenna(port='/dev/ttyUSB0')
 robot.connect()
 
-def turn_90_degrees(robot, direction=1, timeout=5):
-    """Turn robot 90 degrees"""
-    # Wait for heading to be available
-    start_heading = None
-    while start_heading is None:
-        start_heading = robot.get_heading()
-        time.sleep(0.01)
+def turn_90_degrees(robot, direction=1):
+    """Turn robot 90 degrees using time-based approach"""
+    # At 0.5 rad/s, 90 degrees (pi/2 rad) takes pi seconds
+    turn_time = math.pi / 0.5  # ~3.14 seconds for 90 degrees
     
-    print(f"Starting heading: {start_heading:.3f} rad")
-    
-    target_change = direction * math.pi / 2
-    start_time = time.time()
-    
-    while True:
-        # Check timeout
-        if time.time() - start_time > timeout:
-            print("Turn timeout - stopping")
-            break
-        
-        current_heading = robot.get_heading()
-        if current_heading is None:
-            continue
-        
-        # Calculate how much we've turned
-        heading_change = current_heading - start_heading
-        # Normalize to [-pi, pi]
-        while heading_change > math.pi:
-            heading_change -= 2 * math.pi
-        while heading_change < -math.pi:
-            heading_change += 2 * math.pi
-        
-        print(f"Current: {current_heading:.3f}, Change: {heading_change:.3f}, Target: {target_change:.3f}")
-        
-        # Check if we've turned enough
-        if abs(heading_change) >= abs(target_change):
-            print("Turn complete")
-            break
-        
-        # Turn in place
-        robot.drive(0, direction * 0.5)
-        time.sleep(0.01)
-    
+    print(f"Turning {direction * 90} degrees...")
+    robot.drive(0, direction * 0.5)
+    time.sleep(turn_time)
     robot.stop()
-    time.sleep(0.5)
+    time.sleep(1)  # Let robot settle
+
+def move_forward(robot, duration=2):
+    """Move forward with heading correction"""
+    print(f"Moving forward for {duration} seconds...")
+    robot.drive_straight(0.2, duration=duration)
+    time.sleep(0.5)  # Brief pause
 
 try:
-    # Drive in a square
+    print("Driving in a square...")
+    
     for i in range(4):
-        print(f"\n--- Side {i+1} ---")
-        robot.drive_straight(0.2, duration=2)
+        print(f"\n--- Side {i+1} of 4 ---")
+        
+        # Move forward 2 seconds
+        move_forward(robot, duration=2)
+        
+        # Turn 90 degrees left
         turn_90_degrees(robot, direction=1)
     
+    print("\nSquare complete!")
+    robot.stop()
+    
 except KeyboardInterrupt:
-    print("\nInterrupted")
+    print("\nInterrupted by user")
 finally:
+    robot.stop()
     robot.disconnect()
+    print("Robot stopped and disconnected")
