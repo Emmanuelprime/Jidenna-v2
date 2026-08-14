@@ -10,9 +10,9 @@ class G2GController:
         # Controller parameters
         self.linear_speed = 0.2
         self.angular_speed = 0.5
-        self.distance_tolerance = 0.1
-        self.heading_tolerance = 0.1
-        self.timeout = 15
+        self.distance_tolerance = 0.15
+        self.heading_tolerance = 0.15
+        self.timeout = 20
         
         # State
         self.is_navigating = False
@@ -55,7 +55,6 @@ class G2GController:
         self.is_navigating = True
         self.goal_reached = False
         
-        # Get current position
         pose = self.get_pose(timeout=5)
         if pose is None:
             print("ERROR: Cannot get position!")
@@ -63,55 +62,50 @@ class G2GController:
             return False
         
         start_x, start_y, _ = pose
-        
-        # Calculate target in absolute coordinates (current + goal offset)
         target_x = start_x + goal_x
         target_y = start_y + goal_y
         
         print(f"Going to goal: ({goal_x:.2f}, {goal_y:.2f})")
-        print(f"Target position: ({target_x:.2f}, {target_y:.2f})")
         
         start_time = time.time()
+        last_print_time = 0
         
         while self.is_navigating:
-            # Check timeout
             if time.time() - start_time > self.timeout:
-                print("Navigation timeout!")
+                print(f"Navigation timeout! Time: {time.time() - start_time:.1f}s")
                 break
             
-            # Get current position
             pose = self.get_pose(timeout=1)
             if pose is None:
                 time.sleep(0.01)
                 continue
             
             current_x, current_y, _ = pose
-            
-            # Calculate distance to goal
             distance = math.sqrt((target_x - current_x)**2 + (target_y - current_y)**2)
             
-            # Check if goal reached
             if distance < self.distance_tolerance:
                 print(f"Goal reached! Distance: {distance:.3f}m")
                 self.goal_reached = True
                 break
             
-            # Calculate desired heading to goal
             desired_heading = math.atan2(target_y - current_y, target_x - current_x)
-            
-            # Get current heading
             current_heading = self.get_heading(timeout=1)
+            
             if current_heading is None:
                 time.sleep(0.01)
                 continue
             
-            # Calculate heading error
             heading_error = self.shortest_angle_error(desired_heading, current_heading)
             
-            # Decide: turn or move forward
+            # Debug print every second
+            if time.time() - last_print_time > 1:
+                print(f"  Dist: {distance:.2f}m, Heading err: {heading_error:.2f} rad ({heading_error*180/math.pi:.0f} deg)")
+                last_print_time = time.time()
+            
+            # Simple proportional control for turning
             if abs(heading_error) > self.heading_tolerance:
-                # Turn in place to face goal
-                w = self.turning_controller.compute(current_heading, 0, 0.05)
+                w = 2.0 * heading_error
+                w = max(-0.8, min(0.8, w))
                 self.robot.drive(0, w)
             else:
                 # Move forward with heading correction
@@ -121,16 +115,16 @@ class G2GController:
                 self.heading_controller.set_target(desired_heading)
                 w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
                 
-                # Scale speed based on distance (slow down when close)
-                speed = self.linear_speed
+                # Scale speed based on distance
+                move_speed = self.linear_speed
                 if distance < 0.3:
-                    speed = self.linear_speed * (distance / 0.3)
+                    move_speed = self.linear_speed * (distance / 0.3)
+                    move_speed = max(move_speed, 0.05)
                 
-                self.robot.drive(speed, w)
+                self.robot.drive(move_speed, w)
             
             time.sleep(0.01)
         
-        # Stop robot
         self.robot.stop()
         time.sleep(0.3)
         self.is_navigating = False
@@ -145,16 +139,6 @@ class G2GController:
         self.is_navigating = True
         self.goal_reached = False
         
-        pose = self.get_pose(timeout=5)
-        if pose is None:
-            print("ERROR: Cannot get position!")
-            self.is_navigating = False
-            return False
-        
-        start_x, start_y, _ = pose
-        target_x = start_x + goal_x
-        target_y = start_y + goal_y
-        
         print(f"Going to goal: ({goal_x:.2f}, {goal_y:.2f})")
         
         # Phase 1: Turn to face goal
@@ -164,18 +148,65 @@ class G2GController:
         if current_heading is not None:
             heading_error = self.shortest_angle_error(desired_heading, current_heading)
             if abs(heading_error) > self.heading_tolerance:
-                print(f"Turning to face goal...")
+                print(f"Turning to face goal ({heading_error*180/math.pi:.0f} deg)...")
                 self._turn_to_heading(desired_heading)
         
         # Phase 2: Move straight to goal
-        print(f"Moving to goal...")
         distance = math.sqrt(goal_x**2 + goal_y**2)
-        self._move_distance(distance, desired_heading, speed or self.linear_speed)
+        print(f"Moving {distance:.2f}m to goal...")
+        
+        self.robot.stop()
+        time.sleep(0.3)
+        
+        self.heading_controller.set_target(desired_heading)
+        start_time = time.time()
+        start_pose = self.get_pose(timeout=2)
+        
+        if start_pose is None:
+            self.is_navigating = False
+            return False
+        
+        start_x, start_y, _ = start_pose
+        moved_distance = 0
+        
+        while moved_distance < distance - self.distance_tolerance:
+            if time.time() - start_time > self.timeout:
+                print("Move timeout!")
+                break
+            
+            pose = self.get_pose(timeout=1)
+            if pose is None:
+                time.sleep(0.01)
+                continue
+            
+            current_x, current_y, _ = pose
+            moved_distance = math.sqrt((current_x - start_x)**2 + (current_y - start_y)**2)
+            
+            current_heading = self.get_heading(timeout=1)
+            if current_heading is None:
+                time.sleep(0.01)
+                continue
+            
+            data = self.robot.serial.get_latest_data()
+            gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
+            
+            w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
+            
+            # Slow down near goal
+            remaining = distance - moved_distance
+            move_speed = self.linear_speed
+            if remaining < 0.3:
+                move_speed = self.linear_speed * (remaining / 0.3)
+                move_speed = max(move_speed, 0.05)
+            
+            self.robot.drive(move_speed, w)
+            time.sleep(0.01)
         
         self.robot.stop()
         time.sleep(0.3)
         self.is_navigating = False
         self.goal_reached = True
+        print("Goal reached!")
         
         return True
     
@@ -251,10 +282,10 @@ class G2GController:
             
             w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
             
-            # Slow down when close
             remaining = distance - moved_distance
             if remaining < 0.3:
                 speed = 0.2 * (remaining / 0.3)
+                speed = max(speed, 0.05)
             
             self.robot.drive(speed, w)
             time.sleep(0.01)
