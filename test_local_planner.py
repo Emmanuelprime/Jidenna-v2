@@ -3,6 +3,7 @@ sys.path.append('..')
 from jidenna.jidenna import Jidenna
 from jidenna.heading_controller import HeadingController
 from jidenna.local_planner.path_follower import PathFollower
+from jidenna.local_planner.turning_controller import TurningController
 from jidenna.local_planner.trajectory import TrajectoryGenerator
 import time
 
@@ -10,18 +11,24 @@ robot = Jidenna(port='/dev/ttyUSB0')
 robot.connect()
 heading_controller = HeadingController()
 
-path_follower = PathFollower(robot, heading_controller)
+# Create custom turning controller
+turning_controller = TurningController(
+    kp=2.5,      # Proportional gain
+    ki=0.05,     # Integral gain (lower to prevent windup)
+    kd=0.4,      # Derivative gain (higher for more damping)
+    max_angular_velocity=0.8  # Max turn speed
+)
+
+path_follower = PathFollower(robot, heading_controller, turning_controller)
 trajectory_gen = TrajectoryGenerator()
 
-# Generate square with just the corners (4 waypoints + start)
 print("Generating square trajectory...")
 square_path = trajectory_gen.generate_square(
     side_length=1.0,
     start=(0, 0),
-    num_points_per_side=2  # Just corners
+    num_points_per_side=2
 )
 
-# Extract unique waypoints (remove duplicates)
 waypoints = []
 for point in square_path:
     if not waypoints or waypoints[-1] != point:

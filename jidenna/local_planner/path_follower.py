@@ -1,10 +1,12 @@
 import math
 import time
+from .turning_controller import TurningController
 
 class PathFollower:
-    def __init__(self, robot, heading_controller):
+    def __init__(self, robot, heading_controller, turning_controller=None):
         self.robot = robot
         self.heading_controller = heading_controller
+        self.turning_controller = turning_controller or TurningController()
         self.waypoints = []
         self.current_waypoint_index = 0
         self.waypoint_tolerance = 0.15
@@ -15,7 +17,6 @@ class PathFollower:
         self.current_waypoint_index = 0
         
     def get_current_pose(self, timeout=3):
-        """Get current robot pose with timeout"""
         start_time = time.time()
         
         while time.time() - start_time < timeout:
@@ -24,11 +25,9 @@ class PathFollower:
                 return data['x'], data['y'], data['theta']
             time.sleep(0.01)
         
-        print("  WARNING: Could not get pose data!")
         return None
     
     def get_heading(self, timeout=3):
-        """Get current fused heading with timeout"""
         start_time = time.time()
         
         while time.time() - start_time < timeout:
@@ -67,15 +66,20 @@ class PathFollower:
         return error
     
     def turn_in_place(self, target_heading, timeout=8):
-        print(f"  Turning in place to {target_heading:.2f} rad...")
+        print(f"  Turning in place to {target_heading:.2f} rad ({target_heading*180/math.pi:.1f} deg)...")
         
-        self.heading_controller.set_target(target_heading)
+        self.turning_controller.set_target(target_heading)
         start_time = time.time()
+        last_time = time.time()
         
         while True:
             if time.time() - start_time > timeout:
                 print("  Turn timeout!")
                 break
+            
+            current_time = time.time()
+            dt = current_time - last_time
+            last_time = current_time
             
             current_heading = self.get_heading(timeout=1)
             if current_heading is None:
@@ -85,14 +89,21 @@ class PathFollower:
             data = self.robot.serial.get_latest_data()
             gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
             
-            w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
+            # Compute turn velocity
+            w = self.turning_controller.compute(current_heading, gyro_rate_rad, dt)
             
             error = self.shortest_angle_error(target_heading, current_heading)
             
-            if abs(error) < self.heading_tolerance:
-                print(f"  Turn complete! Error: {error:.3f} rad")
+            # Print progress every ~0.5 seconds
+            if int(time.time() * 2) % 2 == 0:
+                print(f"    Error: {error:.3f} rad ({error*180/math.pi:.1f} deg), w: {w:.3f}")
+            
+            # Check if turn is complete
+            if self.turning_controller.is_turn_complete(current_heading):
+                print(f"  Turn complete! Final error: {error:.3f} rad ({error*180/math.pi:.1f} deg)")
                 break
             
+            # Turn in place
             self.robot.drive(0, w)
             time.sleep(0.01)
         
@@ -102,26 +113,24 @@ class PathFollower:
     def navigate_to_waypoint(self, waypoint, speed=0.2):
         print(f"\nNavigating to waypoint: ({waypoint[0]:.2f}, {waypoint[1]:.2f})")
         
-        # Wait for initial pose data
         pose = self.get_current_pose(timeout=5)
         if pose is None:
             print("  ERROR: No position data available!")
             return
         
-        # Calculate desired heading to waypoint
         desired_heading = self.angle_to_waypoint(waypoint)
         if desired_heading is None:
             print("  ERROR: Cannot calculate heading!")
             return
         
-        # Phase 1: Turn in place to face waypoint
+        # Phase 1: Turn in place
         current_heading = self.get_heading(timeout=5)
         if current_heading is not None:
             heading_error = self.shortest_angle_error(desired_heading, current_heading)
             if abs(heading_error) > self.heading_tolerance:
                 self.turn_in_place(desired_heading)
         
-        # Phase 2: Move straight until reaching waypoint
+        # Phase 2: Move straight
         print(f"  Moving straight to waypoint...")
         self.heading_controller.set_target(desired_heading)
         
@@ -157,7 +166,6 @@ class PathFollower:
         
         print(f"Following path with {len(self.waypoints)} waypoints...")
         
-        # Wait for initial data
         print("Waiting for robot data...")
         pose = self.get_current_pose(timeout=10)
         if pose is None:
