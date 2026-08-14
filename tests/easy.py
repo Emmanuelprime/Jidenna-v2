@@ -5,6 +5,11 @@ import math
 import matplotlib.pyplot as plt
 from collections import deque
 
+if len(sys.argv) > 1:
+    linear_velocity = float(sys.argv[1])
+else:
+    linear_velocity = 0.2
+
 ser = serial.Serial(
     port='/dev/ttyUSB0',
     baudrate=115200,
@@ -15,9 +20,7 @@ time.sleep(5)
 
 ser.reset_input_buffer()
 
-linear_velocity = 0.2
-
-print("Starting straight-line driving with heading control...")
+print(f"Starting straight-line driving at {linear_velocity} m/s...")
 print("Format: x, y, theta, vl, vr, mpu_angle, gyro_rate, fused_heading, correction")
 print("Press Ctrl+C to stop")
 print("-"*80)
