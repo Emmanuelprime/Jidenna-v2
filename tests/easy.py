@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from collections import deque
 
 ser = serial.Serial(
-    port='COM19',
+    port='/dev/ttyUSB0',
     baudrate=115200,
     timeout=1
 )
