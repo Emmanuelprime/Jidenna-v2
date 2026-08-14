@@ -10,7 +10,6 @@ robot.connect()
 heading_controller = HeadingController(kp=3.5, ki=0.6, kd=0.15, max_correction=0.8)
 
 def get_current_heading(robot):
-    """Get current fused heading"""
     data = robot.serial.get_latest_data()
     if data:
         gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0
@@ -19,8 +18,22 @@ def get_current_heading(robot):
             return fused
     return robot.get_heading()
 
+def normalize_angle(angle):
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+def shortest_angle_error(target, current):
+    error = target - current
+    while error > math.pi:
+        error -= 2 * math.pi
+    while error < -math.pi:
+        error += 2 * math.pi
+    return error
+
 def turn_to_heading(robot, heading_controller, target_heading, timeout=8):
-    """Turn robot to a specific heading using heading controller"""
     print(f"Turning to heading: {target_heading:.3f} rad ({target_heading*180/math.pi:.1f} deg)")
     
     heading_controller.set_target(target_heading)
@@ -41,13 +54,7 @@ def turn_to_heading(robot, heading_controller, target_heading, timeout=8):
         
         w = heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
         
-        error = heading_controller.target_heading - current_heading
-        while error > math.pi:
-            error -= 2 * math.pi
-        while error < -math.pi:
-            error += 2 * math.pi
-        
-        print(f"  Current: {current_heading:.3f}, Error: {error:.3f}, w: {w:.3f}")
+        error = shortest_angle_error(target_heading, current_heading)
         
         if abs(error) < 0.05:
             print(f"  Turn complete! Error: {error:.3f} rad")
@@ -60,7 +67,6 @@ def turn_to_heading(robot, heading_controller, target_heading, timeout=8):
     time.sleep(0.5)
 
 def drive_straight_with_heading(robot, heading_controller, target_heading, duration=2, speed=0.2):
-    """Drive straight maintaining target heading"""
     print(f"Driving straight at {target_heading:.3f} rad for {duration}s...")
     
     heading_controller.set_target(target_heading)
@@ -85,7 +91,6 @@ def drive_straight_with_heading(robot, heading_controller, target_heading, durat
 try:
     print("Driving in a square with heading correction...")
     
-    # Wait for initial heading
     print("Waiting for initial heading...")
     initial_heading = None
     start_wait = time.time()
@@ -104,23 +109,14 @@ try:
         print(f"\n--- Side {side+1} of 4 ---")
         
         # Calculate target heading for this side
-        target_heading = initial_heading + side * (math.pi / 2)
-        while target_heading > math.pi:
-            target_heading -= 2 * math.pi
-        while target_heading < -math.pi:
-            target_heading += 2 * math.pi
+        target_heading = normalize_angle(initial_heading + side * (math.pi / 2))
         
         # Drive straight maintaining heading
         drive_straight_with_heading(robot, heading_controller, target_heading, duration=2)
         
         # Turn to next heading (except after last side)
         if side < 3:
-            next_heading = target_heading + math.pi / 2
-            while next_heading > math.pi:
-                next_heading -= 2 * math.pi
-            while next_heading < -math.pi:
-                next_heading += 2 * math.pi
-            
+            next_heading = normalize_angle(target_heading + math.pi / 2)
             turn_to_heading(robot, heading_controller, next_heading)
     
     print("\n" + "="*60)
