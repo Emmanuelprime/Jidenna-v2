@@ -17,11 +17,11 @@ try:
     # Test: Go forward 1m
     g2g.go_to_goal_with_phases(1.0, 0.0, speed=0.2)
     
-    # Test: Go left 1m
-    # g2g.go_to_goal_with_phases(0.0, 1.0, speed=0.2)
+    #Test: Go left 1m
+    g2g.go_to_goal_with_phases(0.0, 1.0, speed=0.2)
     
-    # # Test: Go diagonal 1m
-    # g2g.go_to_goal_with_phases(0.7, 0.7, speed=0.2)
+    # Test: Go diagonal 1m
+    g2g.go_to_goal_with_phases(0.7, 0.7, speed=0.2)
     
 except KeyboardInterrupt:
     print("\nInterrupted")
