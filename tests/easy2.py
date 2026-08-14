@@ -40,7 +40,7 @@ is_calibrating = True
 filter_time_constant = 0.5
 
 kp_heading = 5.5
-ki_heading = 0.6
+ki_heading = 1.0
 kd_heading = 0.15
 target_heading = None
 integral_error = 0.0
