@@ -1,8 +1,7 @@
 import math
-import time
 
 class TurningController:
-    def __init__(self, kp=2.0, ki=0.1, kd=0.3, max_angular_velocity=1.0):
+    def __init__(self, kp=2.5, ki=0.05, kd=0.4, max_angular_velocity=0.8):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -11,18 +10,17 @@ class TurningController:
         self.target_heading = None
         self.integral_error = 0.0
         self.last_error = 0.0
-        self.last_time = None
         
-        self.slowdown_threshold = 0.3  # Start slowing down at 17 degrees from target
-        self.stop_threshold = 0.05     # Stop at 3 degrees from target
+        self.slowdown_threshold = 0.3
+        self.stop_threshold = 0.05
         
     def set_target(self, heading):
         self.target_heading = heading
         self.integral_error = 0.0
         self.last_error = 0.0
-        self.last_time = None
         
     def shortest_angle_error(self, target, current):
+        """Calculate shortest angle error, always returns value between -pi and pi"""
         error = target - current
         while error > math.pi:
             error -= 2 * math.pi
@@ -35,12 +33,15 @@ class TurningController:
             self.target_heading = current_heading
             return 0.0
         
-        # Calculate heading error (shortest path)
+        # Calculate shortest angle error
         heading_error = self.shortest_angle_error(self.target_heading, current_heading)
         
-        # Update integral (only when not saturated)
-        self.integral_error += heading_error * dt
-        self.integral_error = max(-1.0, min(1.0, self.integral_error))
+        # Update integral (only accumulate when error is small to prevent windup)
+        if abs(heading_error) < 0.5:
+            self.integral_error += heading_error * dt
+            self.integral_error = max(-0.5, min(0.5, self.integral_error))
+        else:
+            self.integral_error = 0.0
         
         # P term
         p_term = self.kp * heading_error
@@ -48,7 +49,7 @@ class TurningController:
         # I term
         i_term = self.ki * self.integral_error
         
-        # D term - use gyro rate directly
+        # D term - use gyro rate for damping
         d_term = -self.kd * gyro_rate_rad
         
         # Total angular velocity
@@ -57,7 +58,6 @@ class TurningController:
         # Apply slowdown near target
         abs_error = abs(heading_error)
         if abs_error < self.slowdown_threshold:
-            # Scale down angular velocity as we approach target
             slowdown_factor = abs_error / self.slowdown_threshold
             angular_velocity *= slowdown_factor
         
@@ -84,4 +84,3 @@ class TurningController:
         self.target_heading = None
         self.integral_error = 0.0
         self.last_error = 0.0
-        self.last_time = None
