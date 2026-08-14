@@ -10,9 +10,9 @@ class G2GController:
         # Controller parameters
         self.linear_speed = 0.2
         self.angular_speed = 0.5
-        self.distance_tolerance = 0.15
+        self.distance_tolerance = 0.20
         self.heading_tolerance = 0.15
-        self.timeout = 20
+        self.timeout = 25
         
         # State
         self.is_navigating = False
@@ -97,29 +97,27 @@ class G2GController:
             
             heading_error = self.shortest_angle_error(desired_heading, current_heading)
             
-            # Debug print every second
             if time.time() - last_print_time > 1:
                 print(f"  Dist: {distance:.2f}m, Heading err: {heading_error:.2f} rad ({heading_error*180/math.pi:.0f} deg)")
                 last_print_time = time.time()
             
-            # Simple proportional control for turning
             if abs(heading_error) > self.heading_tolerance:
+                # Turn toward goal
                 w = 2.0 * heading_error
                 w = max(-0.8, min(0.8, w))
                 self.robot.drive(0, w)
             else:
-                # Move forward with heading correction
+                # Move forward
                 data = self.robot.serial.get_latest_data()
                 gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
                 
                 self.heading_controller.set_target(desired_heading)
                 w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
                 
-                # Scale speed based on distance
+                # Keep constant speed until very close
                 move_speed = self.linear_speed
-                if distance < 0.3:
-                    move_speed = self.linear_speed * (distance / 0.3)
-                    move_speed = max(move_speed, 0.05)
+                if distance < 0.5:
+                    move_speed = max(0.1, self.linear_speed * (distance / 0.5))
                 
                 self.robot.drive(move_speed, w)
             
@@ -192,12 +190,11 @@ class G2GController:
             
             w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
             
-            # Slow down near goal
+            # Slow down near goal but maintain minimum speed
             remaining = distance - moved_distance
             move_speed = self.linear_speed
-            if remaining < 0.3:
-                move_speed = self.linear_speed * (remaining / 0.3)
-                move_speed = max(move_speed, 0.05)
+            if remaining < 0.5:
+                move_speed = max(0.1, self.linear_speed * (remaining / 0.5))
             
             self.robot.drive(move_speed, w)
             time.sleep(0.01)
@@ -283,11 +280,11 @@ class G2GController:
             w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
             
             remaining = distance - moved_distance
-            if remaining < 0.3:
-                speed = 0.2 * (remaining / 0.3)
-                speed = max(speed, 0.05)
+            move_speed = speed
+            if remaining < 0.5:
+                move_speed = max(0.1, speed * (remaining / 0.5))
             
-            self.robot.drive(speed, w)
+            self.robot.drive(move_speed, w)
             time.sleep(0.01)
         
         self.robot.stop()
