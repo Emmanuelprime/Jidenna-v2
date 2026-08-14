@@ -21,25 +21,19 @@ turning_controller = TurningController(
 path_follower = PathFollower(robot, heading_controller, turning_controller)
 trajectory_gen = TrajectoryGenerator()
 
-# Generate square with RELATIVE waypoints
+# Generate square with JUST corners (1 point per side)
 print("Generating square trajectory (relative)...")
 square_path = trajectory_gen.generate_square(
     side_length=1.0,
-    num_points_per_side=2,
-    relative=True  # Use relative movements
+    num_points_per_side=1,  # Just corners
+    relative=True
 )
 
-# Extract unique waypoints
-waypoints = []
-for point in square_path:
-    if not waypoints or waypoints[-1] != point:
-        waypoints.append(point)
-
-print(f"Using {len(waypoints)} waypoints:")
-for i, wp in enumerate(waypoints):
+print(f"Using {len(square_path)} waypoints:")
+for i, wp in enumerate(square_path):
     print(f"  Waypoint {i+1}: ({wp[0]:.2f}, {wp[1]:.2f})")
 
-path_follower.set_waypoints(waypoints)
+path_follower.set_waypoints(square_path)
 
 try:
     path_follower.follow_path(speed=0.2)
