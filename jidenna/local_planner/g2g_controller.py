@@ -5,15 +5,13 @@ class G2GController:
     def __init__(self, robot, heading_controller, turning_controller=None):
         self.robot = robot
         self.heading_controller = heading_controller
-        self.turning_controller = turning_controller  # Optional, not used internally
+        self.turning_controller = turning_controller
         
-        # Controller parameters
         self.linear_speed = 0.2
         self.distance_tolerance = 0.15
-        self.heading_tolerance = 0.1  # ~6 degrees
+        self.heading_tolerance = 0.1
         self.timeout = 25
         
-        # Turn controller parameters
         self.turn_kp = 1.5
         self.turn_ki = 0.0
         self.turn_kd = 0.3
@@ -23,9 +21,10 @@ class G2GController:
         self.last_turn_error = 0.0
         self.last_turn_time = None
         
-        # State
         self.is_navigating = False
         self.goal_reached = False
+        self.turn_direction_locked = False
+        self.turn_direction = 1  # 1 = left, -1 = right
         
     def get_pose(self, timeout=3):
         start_time = time.time()
@@ -56,57 +55,31 @@ class G2GController:
             error += 2 * math.pi
         return error
     
-    def _turn_controller(self, target_heading, current_heading, gyro_rate_rad, dt):
-        """Internal turn controller - returns angular velocity"""
-        heading_error = self.shortest_angle_error(target_heading, current_heading)
-        
-        # P term
-        p_term = self.turn_kp * heading_error
-        
-        # I term (small, only when close)
-        if abs(heading_error) < 0.3:
-            self.turn_integral += heading_error * dt
-            self.turn_integral = max(-0.3, min(0.3, self.turn_integral))
-        else:
-            self.turn_integral = 0.0
-        
-        i_term = self.turn_ki * self.turn_integral
-        
-        # D term - use gyro rate for damping
-        d_term = -self.turn_kd * gyro_rate_rad
-        
-        # Total angular velocity
-        w = p_term + i_term + d_term
-        
-        # Apply slowdown near target
-        abs_error = abs(heading_error)
-        if abs_error < 0.3:  # Within 17 degrees
-            # Scale down but maintain minimum
-            w *= (abs_error / 0.3)
-            if abs(w) < self.min_turn_speed and abs_error > self.heading_tolerance:
-                w = self.min_turn_speed * (1 if w > 0 else -1)
-        
-        # Limit turn speed
-        if abs(w) > self.max_turn_speed:
-            w = self.max_turn_speed * (1 if w > 0 else -1)
-        
-        # Deadband - stop if very close
-        if abs_error < self.heading_tolerance:
-            w = 0.0
-        
-        return w
-    
     def _turn_to_heading(self, target_heading, timeout=6):
-        """Turn in place to target heading using internal controller"""
+        """Turn in place to target heading with direction lock"""
         self.robot.stop()
         time.sleep(0.3)
         
         print(f"  Turning to {target_heading:.2f} rad ({target_heading*180/math.pi:.0f} deg)...")
         
+        # Lock turn direction at the start
+        current_heading = self.get_heading(timeout=2)
+        if current_heading is None:
+            return
+        
+        heading_error = self.shortest_angle_error(target_heading, current_heading)
+        
+        # Choose turn direction (shortest path)
+        if heading_error > 0:
+            self.turn_direction = 1  # Turn left
+        else:
+            self.turn_direction = -1  # Turn right
+        
+        print(f"  Turn direction: {'LEFT' if self.turn_direction > 0 else 'RIGHT'}")
+        
         start_time = time.time()
         last_time = time.time()
         self.turn_integral = 0.0
-        self.last_turn_error = 0.0
         
         while True:
             if time.time() - start_time > timeout:
@@ -125,15 +98,29 @@ class G2GController:
             data = self.robot.serial.get_latest_data()
             gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
             
-            # Use internal turn controller
-            w = self._turn_controller(target_heading, current_heading, gyro_rate_rad, dt)
-            
             heading_error = self.shortest_angle_error(target_heading, current_heading)
             
             # Check if turn complete
             if abs(heading_error) < self.heading_tolerance:
                 print(f"  Turn complete! Error: {heading_error:.3f} rad ({heading_error*180/math.pi:.1f} deg)")
                 break
+            
+            # Use fixed turn direction with speed based on error
+            abs_error = abs(heading_error)
+            
+            if abs_error > 0.5:  # More than 28 degrees
+                # Turn fast
+                w = self.turn_direction * self.max_turn_speed
+            elif abs_error > self.heading_tolerance:
+                # Slow down proportionally
+                speed_factor = abs_error / 0.5
+                w = self.turn_direction * self.max_turn_speed * speed_factor
+                # Maintain minimum speed
+                if abs(w) < self.min_turn_speed:
+                    w = self.turn_direction * self.min_turn_speed
+            else:
+                # Close enough
+                w = 0.0
             
             self.robot.drive(0, w)
             time.sleep(0.01)
@@ -180,10 +167,8 @@ class G2GController:
             data = self.robot.serial.get_latest_data()
             gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
             
-            # Use heading controller for straight-line correction
             w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
             
-            # Speed control - constant until close
             remaining = distance - moved_distance
             move_speed = speed
             if remaining < 0.3:
@@ -211,7 +196,6 @@ class G2GController:
         
         print(f"\nGoing to goal: ({goal_x:.2f}, {goal_y:.2f})")
         
-        # Calculate target heading and distance
         target_heading = math.atan2(goal_y, goal_x)
         distance = math.sqrt(goal_x**2 + goal_y**2)
         
