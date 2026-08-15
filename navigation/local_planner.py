@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 from .path import Path
-from .pure_pursuit import PurePursuit
+from .pure_pursuite import PurePursuit
 from .controller import SpeedController
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,11 @@ class PlannerConfig:
     final_approach_distance: float = 0.3  # Start direct heading control within this distance
     final_approach_speed: float = 0.1     # Maximum speed during final approach
     min_approach_speed: float = 0.03      # Minimum speed to overcome friction
+    
+    # IMU/Sensor fusion
+    use_imu_heading: bool = True      # Use IMU for heading
+    imu_heading_weight: float = 0.7   # Weight for IMU vs odometry (0-1)
+    max_heading_discrepancy: float = math.radians(30)  # Max difference before warning
 
 class LocalPlanner:
     """Local path planner for differential drive robot"""
@@ -79,9 +84,16 @@ class LocalPlanner:
         self.distance_to_goal = float('inf')
         self.cross_track_error = 0.0
         
+        # IMU data
+        self.last_imu_heading = 0.0
+        self.last_odom_heading = 0.0
+        self.heading_discrepancy = 0.0
+        self.fused_heading = 0.0
+        
         # Safety flags
         self._stop_requested = False
         self._odometry_invalid = False
+        self._imu_invalid = False
     
     def set_path(self, path_points: List[Tuple[float, float]]):
         """Set new path to follow"""
@@ -95,12 +107,14 @@ class LocalPlanner:
             logger.error(f"Invalid path: {e}")
             self.state = PlannerState.ERROR
     
-    def update(self, robot_pose: Tuple[float, float, float]) -> Tuple[float, float]:
+    def update(self, robot_pose: Tuple[float, float, float], 
+               imu_heading: Optional[float] = None) -> Tuple[float, float]:
         """
         Update planner and compute velocity command
         
         Args:
-            robot_pose: (x, y, heading) in world frame
+            robot_pose: (x, y, heading) in world frame (odometry)
+            imu_heading: Heading from IMU in radians (optional)
         
         Returns:
             (v, w) velocity command
@@ -129,8 +143,14 @@ class LocalPlanner:
             logger.warning("Odometry was invalid, but now recovering")
             self._odometry_invalid = False
         
+        # Fuse heading from odometry and IMU
+        heading = self._fuse_heading(robot_pose[2], imu_heading)
+        
+        # Create fused pose
+        fused_pose = (robot_pose[0], robot_pose[1], heading)
+        
         # Find nearest point on path
-        nearest_index, nearest_distance = self.path.get_nearest_point((robot_pose[0], robot_pose[1]))
+        nearest_index, nearest_distance = self.path.get_nearest_point((fused_pose[0], fused_pose[1]))
         self.current_path_index = nearest_index
         
         # Calculate cross-track error
@@ -141,8 +161,8 @@ class LocalPlanner:
         
         # Calculate distance to goal (Euclidean distance to final point)
         self.distance_to_goal = math.sqrt(
-            (goal_point[0] - robot_pose[0])**2 + 
-            (goal_point[1] - robot_pose[1])**2
+            (goal_point[0] - fused_pose[0])**2 + 
+            (goal_point[1] - fused_pose[1])**2
         )
         
         # Check if goal reached (position only, heading is secondary)
@@ -162,7 +182,7 @@ class LocalPlanner:
         
         # FINAL APPROACH: Direct heading control near goal
         if self.distance_to_goal < self.config.final_approach_distance:
-            v, w = self._final_approach(robot_pose, goal_point)
+            v, w = self._final_approach(fused_pose, goal_point)
             self.last_curvature = 0.0  # No curvature in final approach
             self.last_lookahead_point = goal_point
             self.state = PlannerState.RUNNING
@@ -173,7 +193,7 @@ class LocalPlanner:
         # Select lookahead point
         self.pure_pursuit.update_lookahead_distance(abs(self.last_velocity_command[0]))
         lookahead_point, lookahead_index = self.pure_pursuit.select_lookahead_point(
-            self.path, robot_pose, nearest_index
+            self.path, fused_pose, nearest_index
         )
         
         self.last_lookahead_point = lookahead_point
@@ -188,7 +208,7 @@ class LocalPlanner:
                 lookahead_point = self.path.points[-1]
         
         # Calculate curvature
-        curvature = self.pure_pursuit.compute_curvature(robot_pose, lookahead_point)
+        curvature = self.pure_pursuit.compute_curvature(fused_pose, lookahead_point)
         self.last_curvature = curvature
         
         # Check curvature safety limit
@@ -210,6 +230,53 @@ class LocalPlanner:
         self.last_velocity_command = (v, w)
         
         return self.last_velocity_command
+    
+    def _fuse_heading(self, odom_heading: float, imu_heading: Optional[float]) -> float:
+        """
+        Fuse heading from odometry and IMU
+        
+        Args:
+            odom_heading: Heading from wheel odometry (radians)
+            imu_heading: Heading from IMU (radians, optional)
+        
+        Returns:
+            Fused heading (radians)
+        """
+        # Store headings
+        self.last_odom_heading = odom_heading
+        
+        # If IMU not available or disabled, use odometry
+        if not self.config.use_imu_heading or imu_heading is None:
+            self.fused_heading = odom_heading
+            return odom_heading
+        
+        # Store IMU heading
+        self.last_imu_heading = imu_heading
+        
+        # Calculate discrepancy
+        self.heading_discrepancy = self._normalize_angle(odom_heading - imu_heading)
+        
+        # Check for large discrepancy (might indicate sensor issue)
+        if abs(self.heading_discrepancy) > self.config.max_heading_discrepancy:
+            logger.warning(
+                f"Large heading discrepancy: {math.degrees(self.heading_discrepancy):.1f}° "
+                f"(odom={math.degrees(odom_heading):.1f}°, imu={math.degrees(imu_heading):.1f}°)"
+            )
+            # Trust odometry more if IMU seems wrong
+            self.fused_heading = odom_heading
+            return odom_heading
+        
+        # Weighted fusion
+        w_imu = self.config.imu_heading_weight
+        w_odom = 1.0 - w_imu
+        
+        # Use weighted average (handle angle wrapping)
+        fused = w_odom * odom_heading + w_imu * imu_heading
+        
+        # Normalize
+        self.fused_heading = self._normalize_angle(fused)
+        
+        return self.fused_heading
     
     def _final_approach(self, robot_pose: Tuple[float, float, float], 
                        goal_point: Tuple[float, float]) -> Tuple[float, float]:
@@ -277,6 +344,9 @@ class LocalPlanner:
         self.cross_track_error = 0.0
         self._stop_requested = False
         self._odometry_invalid = False
+        self._imu_invalid = False
+        self.heading_discrepancy = 0.0
+        self.fused_heading = 0.0
         logger.info("Planner reset")
     
     def get_state(self) -> PlannerState:
@@ -293,7 +363,11 @@ class LocalPlanner:
             'curvature': self.last_curvature,
             'lookahead_point': self.last_lookahead_point,
             'velocity_command': self.last_velocity_command,
-            'lookahead_distance': self.pure_pursuit.current_lookahead
+            'lookahead_distance': self.pure_pursuit.current_lookahead,
+            'heading_discrepancy': self.heading_discrepancy,
+            'fused_heading': self.fused_heading,
+            'odom_heading': self.last_odom_heading,
+            'imu_heading': self.last_imu_heading
         }
     
     def _is_valid_pose(self, pose: Tuple[float, float, float]) -> bool:

@@ -2,6 +2,7 @@
 """
 Safe test program for real robot
 Tests local planner with real ESP32 hardware
+Uses IMU data for improved heading estimation
 """
 
 import math
@@ -12,6 +13,15 @@ import sys
 import os
 from typing import List, Tuple
 import numpy as np
+
+# Handle matplotlib for headless environments
+import matplotlib
+if os.environ.get('DISPLAY') is None:
+    matplotlib.use('Agg')  # Non-interactive backend
+    HEADLESS = True
+else:
+    HEADLESS = False
+
 import matplotlib.pyplot as plt
 
 # Add parent directory to path if needed
@@ -19,7 +29,39 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from jidenna import RobotAPI, RobotState
 from navigation import LocalPlanner, PlannerConfig, PlannerState
-from main import PathGenerator
+
+# Try to import PathGenerator, or define locally if not available
+try:
+    from main import PathGenerator
+except ImportError:
+    # Define PathGenerator locally if not available from main
+    class PathGenerator:
+        @staticmethod
+        def straight_line(start=(0, 0), end=(3, 0), num_points=30):
+            points = []
+            for i in range(num_points):
+                t = i / (num_points - 1)
+                x = start[0] + t * (end[0] - start[0])
+                y = start[1] + t * (end[1] - start[1])
+                points.append((x, y))
+            return points
+        
+        @staticmethod
+        def right_angle_path(start=(0, 0), intermediate=(0, 2), end=(3, 2), num_points=40):
+            points = []
+            # First segment
+            for i in range(num_points // 2):
+                t = i / (num_points // 2 - 1)
+                x = start[0] + t * (intermediate[0] - start[0])
+                y = start[1] + t * (intermediate[1] - start[1])
+                points.append((x, y))
+            # Second segment
+            for i in range(num_points // 2):
+                t = i / (num_points // 2 - 1)
+                x = intermediate[0] + t * (end[0] - intermediate[0])
+                y = intermediate[1] + t * (end[1] - intermediate[1])
+                points.append((x, y))
+            return points
 
 # Configure logging
 logging.basicConfig(
@@ -33,13 +75,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class RealRobotTester:
-    """Safe tester for real robot"""
+    """Safe tester for real robot with IMU integration"""
     
-    def __init__(self, port: str = None):
+    def __init__(self, port: str = None, use_imu: bool = True):
         """Initialize tester"""
         self.robot = RobotAPI(port=port)
+        self.use_imu = use_imu
+        self.headless = HEADLESS
         
-        # Conservative planner config for real robot
+        # Conservative planner config for real robot with IMU
         config = PlannerConfig(
             lookahead_distance=0.3,
             lookahead_min=0.2,
@@ -48,7 +92,11 @@ class RealRobotTester:
             max_angular_velocity=0.5,  # Limited rotation
             position_tolerance=0.15,
             heading_tolerance=math.radians(30),
-            goal_slowdown_distance=0.4
+            goal_slowdown_distance=0.4,
+            # IMU settings
+            use_imu_heading=use_imu,
+            imu_heading_weight=0.7,  # 70% IMU, 30% odometry
+            max_heading_discrepancy=math.radians(30)
         )
         self.planner = LocalPlanner(config)
         
@@ -73,6 +121,17 @@ class RealRobotTester:
             if state.is_valid():
                 logger.info(f"Telemetry OK - Position: ({state.x:.2f}, {state.y:.2f}), "
                            f"Heading: {math.degrees(state.heading):.1f}°")
+                
+                # Check IMU data if available
+                if self.use_imu and state.is_imu_valid():
+                    logger.info(f"IMU OK - Angle Z: {state.imu_angle_z:.1f}°, "
+                               f"Gyro Z: {state.imu_gyro_z:.1f}°/s")
+                    logger.info(f"Heading discrepancy: {math.degrees(state.heading_discrepancy):.1f}°")
+                elif self.use_imu:
+                    logger.warning("IMU data invalid - using odometry only")
+                    self.use_imu = False
+                    self.planner.config.use_imu_heading = False
+                
                 return True
             else:
                 logger.error("Telemetry invalid - check ESP32 connection")
@@ -114,6 +173,13 @@ class RealRobotTester:
             logger.error(f"SAFETY: Angular velocity too high: {state.w:.2f} rad/s")
             return False
         
+        # Check IMU validity if using it
+        if self.use_imu and not state.is_imu_valid():
+            logger.warning("SAFETY: IMU data invalid")
+            # Don't stop, just fall back to odometry
+            self.use_imu = False
+            self.planner.config.use_imu_heading = False
+        
         return True
     
     def emergency_stop(self):
@@ -127,9 +193,10 @@ class RealRobotTester:
     def run_safe_test(self, path_points: List[Tuple[float, float]], 
                       test_name: str = "real_test",
                       max_duration: float = 30.0):
-        """Run test with safety monitoring"""
+        """Run test with safety monitoring and IMU fusion"""
         logger.info(f"Starting real robot test: {test_name}")
         logger.info("SAFETY: Keep remote/switch ready for manual stop!")
+        logger.info(f"IMU Fusion: {'ENABLED' if self.use_imu else 'DISABLED'}")
         
         # Set path
         self.planner.set_path(path_points)
@@ -140,10 +207,13 @@ class RealRobotTester:
         velocities = []
         distances = []
         timestamps = []
+        imu_angles = []
+        heading_discrepancies = []
         
-        # Setup visualization
-        plt.ion()
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        # Setup visualization if not headless
+        if not self.headless:
+            plt.ion()
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
         
         path_x = [p[0] for p in path_points]
         path_y = [p[1] for p in path_points]
@@ -166,8 +236,14 @@ class RealRobotTester:
                 
                 robot_pose = (state.x, state.y, state.heading)
                 
-                # Update planner
-                v, w = self.planner.update(robot_pose)
+                # Update planner with IMU data
+                if self.use_imu and state.is_imu_valid():
+                    v, w = self.planner.update(
+                        robot_pose, 
+                        imu_heading=state.imu_heading
+                    )
+                else:
+                    v, w = self.planner.update(robot_pose)
                 
                 # Additional safety checks on velocity commands
                 if abs(v) > 0.2:  # Hard limit for first tests
@@ -186,17 +262,25 @@ class RealRobotTester:
                 velocities.append((v, w))
                 distances.append(self.planner.distance_to_goal)
                 timestamps.append(time.time() - self.start_time)
+                imu_angles.append(state.imu_angle_z if state.is_imu_valid() else 0)
+                heading_discrepancies.append(
+                    math.degrees(self.planner.heading_discrepancy) 
+                    if hasattr(self.planner, 'heading_discrepancy') else 0
+                )
                 
                 # Update visualization
-                if len(positions) % 5 == 0:
-                    self._update_visualization(ax1, ax2, path_points, positions, 
-                                              velocities, distances, timestamps)
+                if not self.headless and len(positions) % 5 == 0:
+                    self._update_visualization(ax1, ax2, ax3, path_points, positions, 
+                                              velocities, distances, timestamps,
+                                              imu_angles, heading_discrepancies)
                 
                 # Log progress every 2 seconds
                 if time.time() - self.start_time > 2 and len(positions) % 40 == 0:
+                    debug_info = self.planner.get_debug_info()
                     logger.info(f"Progress: dist={self.planner.distance_to_goal:.2f}m, "
                                f"v={v:.2f}, w={w:.2f}, "
-                               f"pos=({state.x:.2f}, {state.y:.2f})")
+                               f"pos=({state.x:.2f}, {state.y:.2f}), "
+                               f"heading_disc={math.degrees(self.planner.heading_discrepancy):.1f}°")
                 
                 # Check if goal reached
                 if self.planner.state == PlannerState.GOAL_REACHED:
@@ -222,8 +306,11 @@ class RealRobotTester:
             logger.info("Robot stopped")
             
             # Final visualization
-            plt.ioff()
-            plt.show()
+            if not self.headless:
+                plt.ioff()
+                plt.show()
+                plt.savefig(f'{test_name}_results.png')
+                logger.info(f"Results saved to {test_name}_results.png")
         
         # Return results
         return {
@@ -233,15 +320,19 @@ class RealRobotTester:
             'duration': time.time() - self.start_time,
             'final_position': positions[-1] if positions else None,
             'final_distance': distances[-1] if distances else None,
-            'max_velocity': max([abs(v[0]) for v in velocities]) if velocities else 0
+            'max_velocity': max([abs(v[0]) for v in velocities]) if velocities else 0,
+            'avg_heading_discrepancy': np.mean(heading_discrepancies) if heading_discrepancies else 0,
+            'max_heading_discrepancy': max(heading_discrepancies) if heading_discrepancies else 0
         }
     
-    def _update_visualization(self, ax1, ax2, path_points, positions, 
-                             velocities, distances, timestamps):
+    def _update_visualization(self, ax1, ax2, ax3, path_points, positions, 
+                             velocities, distances, timestamps,
+                             imu_angles, heading_discrepancies):
         """Update visualization plots"""
         # Clear and redraw
         ax1.clear()
         ax2.clear()
+        ax3.clear()
         
         # Path plot
         path_x = [p[0] for p in path_points]
@@ -282,6 +373,16 @@ class RealRobotTester:
             ax2.set_title('Progress Metrics')
             ax2.grid(True)
         
+        # IMU and heading discrepancy plot
+        if timestamps:
+            ax3.plot(timestamps, imu_angles, 'b-', label='IMU Angle')
+            ax3.plot(timestamps, heading_discrepancies, 'r-', label='Heading Discrepancy')
+            ax3.legend()
+            ax3.set_xlabel('Time (s)')
+            ax3.set_ylabel('Angle (degrees)')
+            ax3.set_title('IMU Data')
+            ax3.grid(True)
+        
         plt.pause(0.01)
     
     def disconnect(self):
@@ -300,10 +401,19 @@ def main():
                        choices=['straight', 'short', 'turn', 'square'],
                        default='short',
                        help='Test to run')
+    parser.add_argument('--no-imu', action='store_true', 
+                       help='Disable IMU fusion')
     parser.add_argument('--list-ports', action='store_true', 
                        help='List available serial ports')
+    parser.add_argument('--no-viz', action='store_true',
+                       help='Disable visualization')
     
     args = parser.parse_args()
+    
+    # Set headless mode if requested
+    global HEADLESS
+    if args.no_viz:
+        HEADLESS = True
     
     # List ports if requested
     if args.list_ports:
@@ -315,7 +425,7 @@ def main():
         return
     
     # Create tester
-    tester = RealRobotTester(port=args.port)
+    tester = RealRobotTester(port=args.port, use_imu=not args.no_imu)
     
     try:
         # Connect
@@ -345,6 +455,7 @@ def main():
         
         logger.info(f"Test path: {args.test}")
         logger.info(f"Path length: {len(path)} points")
+        logger.info(f"IMU Fusion: {'DISABLED' if args.no_imu else 'ENABLED'}")
         logger.info("SAFETY REMINDERS:")
         logger.info("  1. Ensure robot has clear space")
         logger.info("  2. Keep emergency stop ready")
@@ -367,6 +478,8 @@ def main():
         logger.info(f"Final Position: {results['final_position']}")
         logger.info(f"Final Distance: {results['final_distance']:.3f}m")
         logger.info(f"Max Velocity: {results['max_velocity']:.3f} m/s")
+        logger.info(f"Avg Heading Discrepancy: {results['avg_heading_discrepancy']:.2f}°")
+        logger.info(f"Max Heading Discrepancy: {results['max_heading_discrepancy']:.2f}°")
         
     except KeyboardInterrupt:
         logger.info("Program interrupted")
