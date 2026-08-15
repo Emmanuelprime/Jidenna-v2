@@ -1,15 +1,15 @@
 import sys
-sys.path.append('..')
-from jidenna.jidenna import Jidenna
-import time
+from jidenna import Jidenna
 
-robot = Jidenna(port='/dev/ttyUSB0')
+port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyUSB0'
+duration = float(sys.argv[2]) if len(sys.argv) > 2 else 3.0
+speed = float(sys.argv[3]) if len(sys.argv) > 3 else 0.2
+
+robot = Jidenna(port)
 robot.connect()
 
-try:
-    robot.drive_straight(0.5, duration=5)
-    
-except KeyboardInterrupt:
-    print("Interrupted")
-finally:
-    robot.disconnect()
+print(f"Driving straight for {duration}s at {speed} m/s...")
+robot.drive_straight(speed, duration)
+
+robot.disconnect()
+print("Done")

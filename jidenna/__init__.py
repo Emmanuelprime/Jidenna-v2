@@ -1,7 +1,7 @@
 # robot_control/__init__.py
 
 from .jidenna import Jidenna
-from .heading_controller import HeadingController
+from .heading_controller import HeadingHoldController
 from .sensor_fusion import SensorFusion
 from .serial_comm import SerialComm
 
@@ -11,7 +11,7 @@ __description__ = "Robot control package for Jidenna v2 differential drive robot
 
 __all__ = [
     'Jidenna',
-    'HeadingController',
+    'HeadingHoldController',
     'SensorFusion',
     'SerialComm'
 ]

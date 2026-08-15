@@ -2,13 +2,13 @@ import time
 import math
 from .serial_comm import SerialComm
 from .sensor_fusion import SensorFusion
-from .heading_controller import HeadingController
+from .heading_controller import HeadingHoldController
 
 class Jidenna:
     def __init__(self, port='/dev/ttyUSB0', baudrate=115200):
         self.serial = SerialComm(port, baudrate)
         self.fusion = SensorFusion()
-        self.heading_controller = HeadingController()
+        self.heading_controller = HeadingHoldController()
         
         self.current_v = 0.0
         self.current_w = 0.0
@@ -34,16 +34,14 @@ class Jidenna:
         self.current_w = 0.0
         
     def drive(self, v, w):
-        """Send velocity command directly"""
         self.serial.send_command(v, w)
         self.current_v = v
         self.current_w = w
         
     def drive_straight(self, v, duration=None):
-        """Drive straight with heading correction"""
         start_time = time.time()
+        last_time = time.time()
         
-        # Wait for initial data and set target heading
         while self.fusion.is_calibrating:
             data = self.serial.get_latest_data()
             if data:
@@ -51,24 +49,32 @@ class Jidenna:
                 fused_heading = self.fusion.update(data['theta'], gyro_rate_rad, data['timestamp'])
             time.sleep(0.01)
         
+        # Set initial target heading once calibrated
+        data = self.serial.get_latest_data()
+        if data and self.fusion.fused_heading is not None:
+            self.heading_controller.set_target(self.fusion.fused_heading)
+        
         while True:
             if duration and (time.time() - start_time) > duration:
                 break
+            
+            current_time = time.time()
+            dt = current_time - last_time
+            last_time = current_time
                 
             data = self.serial.get_latest_data()
             if data:
-                # Convert gyro rate to rad/s
                 gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0
-                
-                # Update sensor fusion
                 fused_heading = self.fusion.update(data['theta'], gyro_rate_rad, data['timestamp'])
                 
                 if fused_heading is not None:
-                    # Compute heading correction
-                    dt = 0.05  # Use known command interval
-                    w = self.heading_controller.compute(fused_heading, gyro_rate_rad, dt)
+                    w = self.heading_controller.compute(
+                        fused_heading, 
+                        gyro_rate_rad, 
+                        dt,
+                        linear_velocity=v
+                    )
                     
-                    # Send command
                     self.drive(v, w)
             
             time.sleep(0.005)
@@ -76,12 +82,10 @@ class Jidenna:
         self.stop()
         
     def get_pose(self):
-        """Get current robot pose"""
         data = self.serial.get_latest_data()
         if data:
             return data['x'], data['y'], data['theta']
         return None
     
     def get_heading(self):
-        """Get fused heading estimate"""
         return self.fusion.fused_heading
