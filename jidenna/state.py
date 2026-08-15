@@ -4,15 +4,19 @@ import math
 
 @dataclass
 class RobotState:
-    """Represents the current state of the robot"""
-    x: float = 0.0
-    y: float = 0.0
-    heading: float = 0.0  # radians (from odometry)
-    left_velocity: float = 0.0  # m/s
-    right_velocity: float = 0.0  # m/s
-    imu_angle_z: float = 0.0  # degrees (from MPU6050)
-    imu_gyro_z: float = 0.0  # deg/s (from MPU6050)
-    timestamp: int = 0  # milliseconds
+    """
+    Represents the current state of the robot
+    All angles are in RADIANS unless explicitly stated
+    All velocities are in m/s unless explicitly stated
+    """
+    x: float = 0.0                    # meters
+    y: float = 0.0                    # meters
+    heading: float = 0.0              # radians (from wheel odometry)
+    left_velocity: float = 0.0        # m/s
+    right_velocity: float = 0.0       # m/s
+    imu_angle_z: float = 0.0          # DEGREES (from MPU6050)
+    imu_gyro_z: float = 0.0           # DEGREES/SECOND (from MPU6050)
+    timestamp: int = 0                # milliseconds
     
     @property
     def v(self) -> float:
@@ -22,7 +26,6 @@ class RobotState:
     @property
     def w(self) -> float:
         """Angular velocity in rad/s"""
-        # Differential drive: w = (vr - vl) / wheel_separation
         WHEEL_SEPARATION = 0.521  # from ESP32 code
         if abs(WHEEL_SEPARATION) < 1e-6:
             return 0.0
@@ -30,23 +33,29 @@ class RobotState:
     
     @property
     def imu_heading(self) -> float:
-        """Heading from IMU in radians"""
+        """
+        Heading from IMU in RADIANS
+        Converts from degrees (ESP32) to radians
+        """
         return math.radians(self.imu_angle_z)
     
     @property
     def imu_angular_velocity(self) -> float:
-        """Angular velocity from IMU in rad/s"""
+        """
+        Angular velocity from IMU in RAD/S
+        Converts from deg/s (ESP32) to rad/s
+        """
         return math.radians(self.imu_gyro_z)
     
     @property
     def fused_heading(self) -> float:
         """
         Fused heading using simple weighted average
-        Weight: 70% IMU, 30% odometry (IMU is more reliable for short-term heading)
+        Weight: 70% IMU, 30% odometry
+        Returns heading in RADIANS
         """
-        # Handle angle wrapping
-        odom_heading = self.heading
-        imu_heading = self.imu_heading
+        odom_heading = self.heading  # Already in radians
+        imu_heading = self.imu_heading  # Converted to radians
         
         # Calculate shortest angular difference
         diff = self._normalize_angle(odom_heading - imu_heading)
@@ -62,7 +71,10 @@ class RobotState:
     
     @property
     def heading_discrepancy(self) -> float:
-        """Difference between odometry and IMU heading (radians)"""
+        """
+        Difference between odometry and IMU heading
+        Returns angle in RADIANS
+        """
         return self._normalize_angle(self.heading - self.imu_heading)
     
     def is_valid(self) -> bool:
@@ -80,7 +92,7 @@ class RobotState:
     
     @staticmethod
     def _normalize_angle(angle: float) -> float:
-        """Normalize angle to [-pi, pi]"""
+        """Normalize angle to [-pi, pi] (input/output in radians)"""
         while angle > math.pi:
             angle -= 2 * math.pi
         while angle < -math.pi:
