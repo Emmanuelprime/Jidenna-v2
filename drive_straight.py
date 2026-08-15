@@ -7,7 +7,7 @@ robot = Jidenna(port='/dev/ttyUSB0')
 robot.connect()
 
 try:
-    robot.drive_straight(0.2, duration=5)
+    robot.drive_straight(0.5, duration=5)
     
 except KeyboardInterrupt:
     print("Interrupted")
