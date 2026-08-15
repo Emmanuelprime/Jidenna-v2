@@ -2,10 +2,10 @@ import math
 import time
 
 class G2GController:
-    def __init__(self, robot, heading_controller, turning_controller):
+    def __init__(self, robot, heading_controller, turning_controller=None):
         self.robot = robot
         self.heading_controller = heading_controller
-        self.turning_controller = turning_controller
+        self.turning_controller = turning_controller  # Optional, not used internally
         
         # Controller parameters
         self.linear_speed = 0.2
