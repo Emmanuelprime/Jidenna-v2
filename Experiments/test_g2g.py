@@ -1,7 +1,7 @@
 import sys
 sys.path.append('..')
 from jidenna.jidenna import Jidenna
-from jidenna.heading_controller import HeadingController
+from jidenna.heading_controller import HeadingHoldController
 from jidenna.local_planner.g2g_controller import G2GController
 import time
 
@@ -20,8 +20,10 @@ if len(sys.argv) >= 4:
 
 robot = Jidenna(port='/dev/ttyUSB0')
 robot.connect()
-heading_controller = HeadingController()
 
+heading_controller = HeadingHoldController()
+print("Waiting for stabilization...")
+time.sleep(2)
 # No need for TurningController - G2G has internal turn control
 g2g = G2GController(robot, heading_controller)
 

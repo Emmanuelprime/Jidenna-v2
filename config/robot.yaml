@@ -1,0 +1,25 @@
+# Robot configuration
+robot:
+  wheel_separation: 0.521  # meters
+  wheel_diameter: 0.165    # meters
+  
+# Communication
+communication:
+  baud_rate: 115200
+  timeout_ms: 2000
+  
+# Local planner
+planner:
+  lookahead_distance: 0.5    # meters
+  lookahead_min: 0.3         # meters
+  lookahead_max: 1.0         # meters
+  max_linear_velocity: 0.4   # m/s
+  max_angular_velocity: 1.0  # rad/s
+  position_tolerance: 0.1    # meters
+  heading_tolerance: 15      # degrees
+  
+# Safety
+safety:
+  max_curvature: 2.0
+  goal_slowdown_distance: 1.0
+  emergency_stop_timeout: 2.0

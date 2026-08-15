@@ -1,7 +1,7 @@
 import sys
 sys.path.append('..')
-from jidenna.jidenna import Jidenna
-from jidenna.heading_controller import HeadingController
+from Experiments.jidenna.jidenna import Jidenna
+from Experiments.jidenna.heading_controller import HeadingController
 import time
 import math
 
