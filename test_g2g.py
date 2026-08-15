@@ -28,7 +28,13 @@ g2g = G2GController(robot, heading_controller, turning_controller)
 
 try:
     print(f"Going to goal: ({goal_x:.2f}, {goal_y:.2f}) at {speed:.2f} m/s")
-    g2g.go_to_goal(goal_x, goal_y, speed=speed)
+    
+    # Use go_to_goal_with_phases for backward movement
+    if goal_x < 0:
+        print("Using phased navigation for backward goal...")
+        g2g.go_to_goal_with_phases(goal_x, goal_y, speed=speed)
+    else:
+        g2g.go_to_goal(goal_x, goal_y, speed=speed)
     
 except KeyboardInterrupt:
     print("\nInterrupted")
