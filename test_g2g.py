@@ -6,6 +6,19 @@ from jidenna.local_planner.g2g_controller import G2GController
 from jidenna.local_planner.turning_controller import TurningController
 import time
 
+if len(sys.argv) >= 3:
+    goal_x = float(sys.argv[1])
+    goal_y = float(sys.argv[2])
+else:
+    goal_x = 1.0
+    goal_y = 0.0
+    print("Using default goal: (1.0, 0.0)")
+    print("Usage: python test_g2g.py <goal_x> <goal_y> [speed]")
+
+speed = 0.2
+if len(sys.argv) >= 4:
+    speed = float(sys.argv[3])
+
 robot = Jidenna(port='/dev/ttyUSB0')
 robot.connect()
 heading_controller = HeadingController()
@@ -14,14 +27,8 @@ turning_controller = TurningController()
 g2g = G2GController(robot, heading_controller, turning_controller)
 
 try:
-    # Test: Go forward 1m
-    g2g.go_to_goal(1.0, 1.0, speed=0.2)
-    
-    #Test: Go left 1m
-    # g2g.go_to_goal_with_phases(0.0, 1.0, speed=0.2)
-    
-    # # Test: Go diagonal 1m
-    # g2g.go_to_goal_with_phases(0.7, 0.7, speed=0.2)
+    print(f"Going to goal: ({goal_x:.2f}, {goal_y:.2f}) at {speed:.2f} m/s")
+    g2g.go_to_goal(goal_x, goal_y, speed=speed)
     
 except KeyboardInterrupt:
     print("\nInterrupted")
