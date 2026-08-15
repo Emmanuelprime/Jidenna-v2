@@ -7,12 +7,23 @@ class G2GController:
         self.heading_controller = heading_controller
         self.turning_controller = turning_controller
         
+        # Controller parameters
         self.linear_speed = 0.2
-        self.angular_speed = 0.5
-        self.distance_tolerance = 0.20
-        self.heading_tolerance = 0.15
+        self.distance_tolerance = 0.15
+        self.heading_tolerance = 0.1  # ~6 degrees
         self.timeout = 25
         
+        # Turn controller parameters
+        self.turn_kp = 1.5
+        self.turn_ki = 0.0
+        self.turn_kd = 0.3
+        self.max_turn_speed = 0.6
+        self.min_turn_speed = 0.08
+        self.turn_integral = 0.0
+        self.last_turn_error = 0.0
+        self.last_turn_time = None
+        
+        # State
         self.is_navigating = False
         self.goal_reached = False
         
@@ -45,134 +56,112 @@ class G2GController:
             error += 2 * math.pi
         return error
     
-    def go_to_goal(self, goal_x, goal_y, speed=None):
-        """Navigate to a goal position (x, y) relative to current position"""
-        if speed:
-            self.linear_speed = speed
+    def _turn_controller(self, target_heading, current_heading, gyro_rate_rad, dt):
+        """Internal turn controller - returns angular velocity"""
+        heading_error = self.shortest_angle_error(target_heading, current_heading)
         
-        self.is_navigating = True
-        self.goal_reached = False
+        # P term
+        p_term = self.turn_kp * heading_error
         
-        pose = self.get_pose(timeout=5)
-        if pose is None:
-            print("ERROR: Cannot get position!")
-            self.is_navigating = False
-            return False
+        # I term (small, only when close)
+        if abs(heading_error) < 0.3:
+            self.turn_integral += heading_error * dt
+            self.turn_integral = max(-0.3, min(0.3, self.turn_integral))
+        else:
+            self.turn_integral = 0.0
         
-        start_x, start_y, _ = pose
-        target_x = start_x + goal_x
-        target_y = start_y + goal_y
+        i_term = self.turn_ki * self.turn_integral
         
-        print(f"Going to goal: ({goal_x:.2f}, {goal_y:.2f})")
+        # D term - use gyro rate for damping
+        d_term = -self.turn_kd * gyro_rate_rad
+        
+        # Total angular velocity
+        w = p_term + i_term + d_term
+        
+        # Apply slowdown near target
+        abs_error = abs(heading_error)
+        if abs_error < 0.3:  # Within 17 degrees
+            # Scale down but maintain minimum
+            w *= (abs_error / 0.3)
+            if abs(w) < self.min_turn_speed and abs_error > self.heading_tolerance:
+                w = self.min_turn_speed * (1 if w > 0 else -1)
+        
+        # Limit turn speed
+        if abs(w) > self.max_turn_speed:
+            w = self.max_turn_speed * (1 if w > 0 else -1)
+        
+        # Deadband - stop if very close
+        if abs_error < self.heading_tolerance:
+            w = 0.0
+        
+        return w
+    
+    def _turn_to_heading(self, target_heading, timeout=6):
+        """Turn in place to target heading using internal controller"""
+        self.robot.stop()
+        time.sleep(0.3)
+        
+        print(f"  Turning to {target_heading:.2f} rad ({target_heading*180/math.pi:.0f} deg)...")
         
         start_time = time.time()
-        last_print_time = 0
+        last_time = time.time()
+        self.turn_integral = 0.0
+        self.last_turn_error = 0.0
         
-        while self.is_navigating:
-            if time.time() - start_time > self.timeout:
-                print(f"Navigation timeout! Time: {time.time() - start_time:.1f}s")
+        while True:
+            if time.time() - start_time > timeout:
+                print("  Turn timeout!")
                 break
             
-            pose = self.get_pose(timeout=1)
-            if pose is None:
-                time.sleep(0.01)
-                continue
+            current_time = time.time()
+            dt = current_time - last_time
+            last_time = current_time
             
-            current_x, current_y, _ = pose
-            distance = math.sqrt((target_x - current_x)**2 + (target_y - current_y)**2)
-            
-            if distance < self.distance_tolerance:
-                print(f"Goal reached! Distance: {distance:.3f}m")
-                self.goal_reached = True
-                break
-            
-            desired_heading = math.atan2(target_y - current_y, target_x - current_x)
             current_heading = self.get_heading(timeout=1)
-            
             if current_heading is None:
                 time.sleep(0.01)
                 continue
             
-            heading_error = self.shortest_angle_error(desired_heading, current_heading)
+            data = self.robot.serial.get_latest_data()
+            gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
             
-            if time.time() - last_print_time > 1:
-                print(f"  Dist: {distance:.2f}m, Heading err: {heading_error:.2f} rad ({heading_error*180/math.pi:.0f} deg)")
-                last_print_time = time.time()
+            # Use internal turn controller
+            w = self._turn_controller(target_heading, current_heading, gyro_rate_rad, dt)
             
-            # Check if goal is behind the robot
-            if abs(heading_error) > math.pi / 2:  # More than 90 degrees
-                # Goal is behind - turn around
-                w = 2.0 * heading_error
-                w = max(-0.8, min(0.8, w))
-                self.robot.drive(0, w)
-            elif abs(heading_error) > self.heading_tolerance:
-                # Turn toward goal
-                w = 2.0 * heading_error
-                w = max(-0.8, min(0.8, w))
-                self.robot.drive(0, w)
-            else:
-                # Move forward
-                data = self.robot.serial.get_latest_data()
-                gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
-                
-                self.heading_controller.set_target(desired_heading)
-                w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
-                
-                move_speed = self.linear_speed
-                if distance < 0.5:
-                    move_speed = max(0.1, self.linear_speed * (distance / 0.5))
-                
-                self.robot.drive(move_speed, w)
+            heading_error = self.shortest_angle_error(target_heading, current_heading)
             
+            # Check if turn complete
+            if abs(heading_error) < self.heading_tolerance:
+                print(f"  Turn complete! Error: {heading_error:.3f} rad ({heading_error*180/math.pi:.1f} deg)")
+                break
+            
+            self.robot.drive(0, w)
             time.sleep(0.01)
         
         self.robot.stop()
         time.sleep(0.3)
-        self.is_navigating = False
-        
-        return self.goal_reached
     
-    def go_to_goal_with_phases(self, goal_x, goal_y, speed=None):
-        """Navigate to goal with distinct turn and move phases - handles backward goals"""
-        if speed:
-            self.linear_speed = speed
-        
-        self.is_navigating = True
-        self.goal_reached = False
-        
-        print(f"Going to goal: ({goal_x:.2f}, {goal_y:.2f})")
-        
-        # Calculate desired heading to face goal
-        desired_heading = math.atan2(goal_y, goal_x)
-        current_heading = self.get_heading(timeout=5)
-        
-        if current_heading is not None:
-            heading_error = self.shortest_angle_error(desired_heading, current_heading)
-            if abs(heading_error) > self.heading_tolerance:
-                print(f"Turning to face goal ({heading_error*180/math.pi:.0f} deg)...")
-                self._turn_to_heading(desired_heading)
-        
-        # Move straight
-        distance = math.sqrt(goal_x**2 + goal_y**2)
-        print(f"Moving {distance:.2f}m to goal...")
-        
+    def _move_straight(self, distance, heading, speed=0.2, timeout=15):
+        """Move straight for a specific distance"""
         self.robot.stop()
-        time.sleep(0.3)
+        time.sleep(0.2)
         
-        self.heading_controller.set_target(desired_heading)
+        self.heading_controller.set_target(heading)
         start_time = time.time()
         start_pose = self.get_pose(timeout=2)
         
         if start_pose is None:
-            self.is_navigating = False
             return False
         
         start_x, start_y, _ = start_pose
         moved_distance = 0
+        last_print_time = 0
+        
+        print(f"  Moving {distance:.2f}m...")
         
         while moved_distance < distance - self.distance_tolerance:
-            if time.time() - start_time > self.timeout:
-                print("Move timeout!")
+            if time.time() - start_time > timeout:
+                print("  Move timeout!")
                 break
             
             pose = self.get_pose(timeout=1)
@@ -191,60 +180,59 @@ class G2GController:
             data = self.robot.serial.get_latest_data()
             gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
             
+            # Use heading controller for straight-line correction
             w = self.heading_controller.compute(current_heading, gyro_rate_rad, 0.05)
             
+            # Speed control - constant until close
             remaining = distance - moved_distance
-            move_speed = self.linear_speed
-            if remaining < 0.5:
-                move_speed = max(0.1, self.linear_speed * (remaining / 0.5))
+            move_speed = speed
+            if remaining < 0.3:
+                move_speed = max(0.08, speed * (remaining / 0.3))
+            
+            if time.time() - last_print_time > 1:
+                print(f"    Dist: {moved_distance:.2f}m / {distance:.2f}m, Remaining: {remaining:.2f}m")
+                last_print_time = time.time()
             
             self.robot.drive(move_speed, w)
             time.sleep(0.01)
         
         self.robot.stop()
         time.sleep(0.3)
-        self.is_navigating = False
-        self.goal_reached = True
-        print("Goal reached!")
-        
+        print(f"  Move complete! Final distance: {moved_distance:.2f}m")
         return True
     
-    def _turn_to_heading(self, target_heading, timeout=8):
-        """Turn in place to target heading"""
-        self.robot.stop()
-        time.sleep(0.3)
+    def go_to_goal(self, goal_x, goal_y, speed=None):
+        """Navigate to goal using unified controller"""
+        if speed:
+            self.linear_speed = speed
         
-        self.turning_controller.set_target(target_heading)
-        start_time = time.time()
-        last_time = time.time()
+        self.is_navigating = True
+        self.goal_reached = False
         
-        while True:
-            if time.time() - start_time > timeout:
-                print("Turn timeout!")
-                break
-            
-            current_time = time.time()
-            dt = current_time - last_time
-            last_time = current_time
-            
-            current_heading = self.get_heading(timeout=1)
-            if current_heading is None:
-                time.sleep(0.01)
-                continue
-            
-            data = self.robot.serial.get_latest_data()
-            gyro_rate_rad = data['gyro_rate'] * math.pi / 180.0 if data else 0.0
-            
-            w = self.turning_controller.compute(current_heading, gyro_rate_rad, dt)
-            
-            if self.turning_controller.is_turn_complete(current_heading):
-                break
-            
-            self.robot.drive(0, w)
-            time.sleep(0.01)
+        print(f"\nGoing to goal: ({goal_x:.2f}, {goal_y:.2f})")
         
-        self.robot.stop()
-        time.sleep(0.3)
+        # Calculate target heading and distance
+        target_heading = math.atan2(goal_y, goal_x)
+        distance = math.sqrt(goal_x**2 + goal_y**2)
+        
+        # Phase 1: Turn to face goal
+        current_heading = self.get_heading(timeout=5)
+        if current_heading is not None:
+            heading_error = self.shortest_angle_error(target_heading, current_heading)
+            if abs(heading_error) > self.heading_tolerance:
+                self._turn_to_heading(target_heading)
+        
+        # Phase 2: Move straight
+        success = self._move_straight(distance, target_heading, self.linear_speed)
+        
+        self.is_navigating = False
+        self.goal_reached = success
+        
+        return success
+    
+    def go_to_goal_with_phases(self, goal_x, goal_y, speed=None):
+        """Alias for go_to_goal - same unified controller"""
+        return self.go_to_goal(goal_x, goal_y, speed)
     
     def stop(self):
         self.is_navigating = False
