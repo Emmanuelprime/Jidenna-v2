@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 from .path import Path
-from .pure_pursuite import PurePursuit
+from .pure_pursuit import PurePursuit
 from .controller import SpeedController
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,11 @@ class PlannerConfig:
     
     # Path tracking
     path_replan_distance: float = 0.3  # Reduced from 0.5
+    
+    # Final approach parameters
+    final_approach_distance: float = 0.3  # Start direct heading control within this distance
+    final_approach_speed: float = 0.1     # Maximum speed during final approach
+    min_approach_speed: float = 0.03      # Minimum speed to overcome friction
 
 class LocalPlanner:
     """Local path planner for differential drive robot"""
@@ -155,6 +160,16 @@ class LocalPlanner:
             logger.info("Path completed")
             return self.last_velocity_command
         
+        # FINAL APPROACH: Direct heading control near goal
+        if self.distance_to_goal < self.config.final_approach_distance:
+            v, w = self._final_approach(robot_pose, goal_point)
+            self.last_curvature = 0.0  # No curvature in final approach
+            self.last_lookahead_point = goal_point
+            self.state = PlannerState.RUNNING
+            self.last_velocity_command = (v, w)
+            return self.last_velocity_command
+        
+        # NORMAL PATH FOLLOWING: Pure Pursuit
         # Select lookahead point
         self.pure_pursuit.update_lookahead_distance(abs(self.last_velocity_command[0]))
         lookahead_point, lookahead_index = self.pure_pursuit.select_lookahead_point(
@@ -190,18 +205,51 @@ class LocalPlanner:
             self.config.goal_slowdown_distance
         )
         
-        # If very close to goal, ensure minimum speed to overcome friction
-        if self.distance_to_goal < 0.3 and abs(v) < 0.05:
-            v = 0.05  # Minimum speed to keep moving toward goal
-            # Limit angular velocity when close to goal
-            w = max(-0.3, min(w, 0.3))
-            logger.debug(f"Near goal - maintaining minimum speed: v={v:.3f}, w={w:.3f}")
-        
         # Set state
         self.state = PlannerState.RUNNING
         self.last_velocity_command = (v, w)
         
         return self.last_velocity_command
+    
+    def _final_approach(self, robot_pose: Tuple[float, float, float], 
+                       goal_point: Tuple[float, float]) -> Tuple[float, float]:
+        """
+        Direct heading control for final approach to goal
+        
+        Args:
+            robot_pose: (x, y, heading)
+            goal_point: (x, y) target
+        
+        Returns:
+            (v, w) velocity command
+        """
+        # Calculate angle to goal
+        dx = goal_point[0] - robot_pose[0]
+        dy = goal_point[1] - robot_pose[1]
+        angle_to_goal = math.atan2(dy, dx)
+        
+        # Calculate heading error
+        heading_error = self._normalize_angle(angle_to_goal - robot_pose[2])
+        
+        # Simple proportional control for heading
+        w = 1.5 * heading_error
+        
+        # Slow down as we approach goal
+        speed_factor = max(0.3, self.distance_to_goal / self.config.final_approach_distance)
+        v = self.config.final_approach_speed * speed_factor
+        
+        # Ensure minimum speed to overcome friction
+        v = max(self.config.min_approach_speed, min(v, self.config.final_approach_speed))
+        
+        # Limit angular velocity
+        max_w = 0.5  # Maximum angular velocity during final approach
+        w = max(-max_w, min(w, max_w))
+        
+        logger.debug(f"Final approach: dist={self.distance_to_goal:.3f}m, "
+                    f"heading_err={math.degrees(heading_error):.1f}°, "
+                    f"v={v:.3f}, w={w:.3f}")
+        
+        return v, w
     
     def stop(self):
         """Request stop"""
@@ -276,3 +324,11 @@ class LocalPlanner:
             target_v *= slowdown_factor
         
         return target_v
+    
+    def _normalize_angle(self, angle: float) -> float:
+        """Normalize angle to [-pi, pi]"""
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
