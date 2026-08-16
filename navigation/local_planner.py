@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 from .path import Path
-from .pure_pursuite import PurePursuit
+from .pure_pursuit import PurePursuit
 from .controller import SpeedController
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,8 @@ class PlannerConfig:
     lookahead_distance: float = 0.3
     lookahead_min: float = 0.2
     lookahead_max: float = 0.8
+    lookahead_speed_factor: float = 0.5  # How much to increase lookahead with speed
+    max_curvature_rate: float = 2.0  # Maximum rate of curvature change (1/m²)
     
     # Speed limits
     max_linear_velocity: float = 0.4
@@ -80,7 +82,9 @@ class LocalPlanner:
         self.pure_pursuit = PurePursuit(
             lookahead_distance=self.config.lookahead_distance,
             lookahead_min=self.config.lookahead_min,
-            lookahead_max=self.config.lookahead_max
+            lookahead_max=self.config.lookahead_max,
+            lookahead_speed_factor=self.config.lookahead_speed_factor,
+            max_curvature_rate=self.config.max_curvature_rate
         )
         self.speed_controller = SpeedController(
             max_linear_velocity=self.config.max_linear_velocity,
@@ -125,6 +129,7 @@ class LocalPlanner:
             self._stop_requested = False
             self.correction_active = False
             self.speed_controller.reset()  # Reset acceleration limiting
+            self.pure_pursuit.reset()  # Reset Pure Pursuit state
             logger.info(f"New path set with {len(path_points)} points")
         except ValueError as e:
             logger.error(f"Invalid path: {e}")
@@ -222,8 +227,13 @@ class LocalPlanner:
             return self.last_velocity_command
         
         # NORMAL PATH FOLLOWING: Pure Pursuit with position correction
+        # Update lookahead distance based on speed and curvature
+        self.pure_pursuit.update_lookahead_distance(
+            abs(self.last_velocity_command[0]),
+            curvature=self.last_curvature  # Pass current curvature for adaptive lookahead
+        )
+        
         # Select lookahead point
-        self.pure_pursuit.update_lookahead_distance(abs(self.last_velocity_command[0]))
         lookahead_point, lookahead_index = self.pure_pursuit.select_lookahead_point(
             self.path, fused_pose, nearest_index
         )
@@ -238,7 +248,7 @@ class LocalPlanner:
             else:
                 lookahead_point = self.path.points[-1]
         
-        # Calculate curvature
+        # Calculate curvature (with rate limiting in Pure Pursuit)
         curvature = self.pure_pursuit.compute_curvature(fused_pose, lookahead_point)
         
         # Apply position correction if needed
@@ -427,6 +437,7 @@ class LocalPlanner:
         self.fused_heading = 0.0
         self.correction_active = False
         self.speed_controller.reset()
+        self.pure_pursuit.reset()
         logger.info("Planner reset")
     
     def get_state(self) -> PlannerState:
@@ -443,13 +454,16 @@ class LocalPlanner:
             'curvature': self.last_curvature,
             'lookahead_point': self.last_lookahead_point,
             'velocity_command': self.last_velocity_command,
-            'lookahead_distance': self.pure_pursuit.current_lookahead,
             'heading_discrepancy': self.heading_discrepancy,
             'fused_heading': self.fused_heading,
             'odom_heading': self.last_odom_heading,
             'imu_heading': self.last_imu_heading,
             'correction_active': self.correction_active
         }
+        
+        # Add Pure Pursuit info
+        pp_info = self.pure_pursuit.get_debug_info()
+        debug_info.update(pp_info)
         
         # Add speed controller info
         speed_info = self.speed_controller.get_debug_info()
