@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 from .path import Path
-from .pure_pursuite import PurePursuit
+from .pure_pursuit import PurePursuit
 from .controller import SpeedController
 
 logger = logging.getLogger(__name__)
@@ -21,36 +21,41 @@ class PlannerState(Enum):
 class PlannerConfig:
     """Configuration for local planner"""
     # Pure Pursuit parameters
-    lookahead_distance: float = 0.3  # Reduced from 0.5 to prevent overshooting
-    lookahead_min: float = 0.2      # Reduced from 0.3
-    lookahead_max: float = 0.8      # Reduced from 1.5
+    lookahead_distance: float = 0.3
+    lookahead_min: float = 0.2
+    lookahead_max: float = 0.8
     
     # Speed limits
-    max_linear_velocity: float = 0.4  # Reduced from 0.5 for smoother control
-    max_angular_velocity: float = 1.0  # rad/s
-    min_linear_velocity: float = 0.0  # m/s
+    max_linear_velocity: float = 0.4
+    max_angular_velocity: float = 1.0
+    min_linear_velocity: float = 0.0
     
     # Goal tolerances
-    position_tolerance: float = 0.15  # Increased from 0.1 for easier goal reaching
-    heading_tolerance: float = math.radians(30)  # Reduced from 60 to be more practical
+    position_tolerance: float = 0.15
+    heading_tolerance: float = math.radians(30)
     
     # Safety
-    max_curvature: float = 2.0  # 1/m
-    goal_slowdown_distance: float = 0.5  # Reduced from 1.0 to maintain speed longer
+    max_curvature: float = 2.0
+    goal_slowdown_distance: float = 0.5
     stop_on_path_end: bool = True
     
     # Path tracking
-    path_replan_distance: float = 0.3  # Reduced from 0.5
+    path_replan_distance: float = 0.3
     
     # Final approach parameters
-    final_approach_distance: float = 0.3  # Start direct heading control within this distance
-    final_approach_speed: float = 0.1     # Maximum speed during final approach
-    min_approach_speed: float = 0.03      # Minimum speed to overcome friction
+    final_approach_distance: float = 0.3
+    final_approach_speed: float = 0.1
+    min_approach_speed: float = 0.03
     
     # IMU/Sensor fusion
-    use_imu_heading: bool = True      # Use IMU for heading
-    imu_heading_weight: float = 0.7   # Weight for IMU vs odometry (0-1)
-    max_heading_discrepancy: float = math.radians(30)  # Max difference before warning
+    use_imu_heading: bool = True
+    imu_heading_weight: float = 0.8  # Increased from 0.7 for better heading
+    max_heading_discrepancy: float = math.radians(45)  # Increased from 30 to allow more IMU trust
+    
+    # Position correction
+    position_correction_gain: float = 1.5  # Aggressive correction when off path
+    max_cross_track_error: float = 0.5  # Maximum allowed cross-track error before strong correction
+    correction_start_distance: float = 0.1  # Start correcting when off path by this much
 
 class LocalPlanner:
     """Local path planner for differential drive robot"""
@@ -90,6 +95,10 @@ class LocalPlanner:
         self.heading_discrepancy = 0.0
         self.fused_heading = 0.0
         
+        # Position correction
+        self.position_error = 0.0
+        self.correction_active = False
+        
         # Safety flags
         self._stop_requested = False
         self._odometry_invalid = False
@@ -102,6 +111,7 @@ class LocalPlanner:
             self.current_path_index = 0
             self.state = PlannerState.RUNNING
             self._stop_requested = False
+            self.correction_active = False
             logger.info(f"New path set with {len(path_points)} points")
         except ValueError as e:
             logger.error(f"Invalid path: {e}")
@@ -156,6 +166,12 @@ class LocalPlanner:
         # Calculate cross-track error
         self.cross_track_error = nearest_distance
         
+        # Check if position correction is needed
+        self.correction_active = self.cross_track_error > self.config.correction_start_distance
+        
+        if self.correction_active:
+            logger.debug(f"Position correction active: error={self.cross_track_error:.3f}m")
+        
         # Get goal point
         goal_point = self.path.points[-1]
         
@@ -183,13 +199,13 @@ class LocalPlanner:
         # FINAL APPROACH: Direct heading control near goal
         if self.distance_to_goal < self.config.final_approach_distance:
             v, w = self._final_approach(fused_pose, goal_point)
-            self.last_curvature = 0.0  # No curvature in final approach
+            self.last_curvature = 0.0
             self.last_lookahead_point = goal_point
             self.state = PlannerState.RUNNING
             self.last_velocity_command = (v, w)
             return self.last_velocity_command
         
-        # NORMAL PATH FOLLOWING: Pure Pursuit
+        # NORMAL PATH FOLLOWING: Pure Pursuit with position correction
         # Select lookahead point
         self.pure_pursuit.update_lookahead_distance(abs(self.last_velocity_command[0]))
         lookahead_point, lookahead_index = self.pure_pursuit.select_lookahead_point(
@@ -199,7 +215,6 @@ class LocalPlanner:
         self.last_lookahead_point = lookahead_point
         
         if lookahead_point is None:
-            # Path ended unexpectedly
             if self.config.stop_on_path_end:
                 self.state = PlannerState.STOPPED
                 self.last_velocity_command = (0.0, 0.0)
@@ -209,15 +224,34 @@ class LocalPlanner:
         
         # Calculate curvature
         curvature = self.pure_pursuit.compute_curvature(fused_pose, lookahead_point)
+        
+        # Apply position correction if needed
+        if self.correction_active:
+            # Calculate correction based on cross-track error
+            correction = self._calculate_position_correction(
+                fused_pose, self.path.points[nearest_index]
+            )
+            curvature += correction
+            logger.debug(f"Applied correction: {correction:.3f} (CTE: {self.cross_track_error:.3f}m)")
+        
         self.last_curvature = curvature
         
         # Check curvature safety limit
-        if abs(curvature) > self.config.max_curvature:
-            logger.warning(f"Curvature too high: {curvature:.2f}, limiting")
-            curvature = math.copysign(self.config.max_curvature, curvature)
+        max_allowed_curvature = self.config.max_curvature
+        if self.correction_active:
+            # Allow higher curvature during correction
+            max_allowed_curvature *= 1.5
         
-        # Calculate desired velocity based on current speed and distance
+        if abs(curvature) > max_allowed_curvature:
+            logger.debug(f"Curvature limited: {curvature:.2f} -> {max_allowed_curvature:.2f}")
+            curvature = math.copysign(max_allowed_curvature, curvature)
+        
+        # Calculate desired velocity
         target_velocity = self._calculate_target_velocity()
+        
+        # Reduce speed during correction
+        if self.correction_active:
+            target_velocity *= 0.7  # Slow down for correction
         
         # Apply speed control
         v, w = self.speed_controller.compute_velocity(
@@ -231,16 +265,44 @@ class LocalPlanner:
         
         return self.last_velocity_command
     
-    def _fuse_heading(self, odom_heading: float, imu_heading: Optional[float]) -> float:
+    def _calculate_position_correction(self, robot_pose: Tuple[float, float, float], 
+                                      nearest_point: Tuple[float, float]) -> float:
         """
-        Fuse heading from odometry and IMU
+        Calculate curvature correction to bring robot back to path
         
         Args:
-            odom_heading: Heading from wheel odometry (radians)
-            imu_heading: Heading from IMU (radians, optional)
+            robot_pose: (x, y, heading)
+            nearest_point: (x, y) nearest point on path
         
         Returns:
-            Fused heading (radians)
+            Curvature correction value
+        """
+        # Calculate vector from robot to nearest point
+        dx = nearest_point[0] - robot_pose[0]
+        dy = nearest_point[1] - robot_pose[1]
+        
+        # Transform to robot frame
+        local_x = dx * math.cos(robot_pose[2]) + dy * math.sin(robot_pose[2])
+        local_y = -dx * math.sin(robot_pose[2]) + dy * math.cos(robot_pose[2])
+        
+        # Calculate correction curvature
+        # Positive local_y means path is to the left
+        correction = self.config.position_correction_gain * local_y
+        
+        # Limit correction magnitude
+        max_correction = 1.0  # Maximum correction curvature
+        correction = max(-max_correction, min(correction, max_correction))
+        
+        return correction
+    
+    def _fuse_heading(self, odom_heading: float, imu_heading: Optional[float]) -> float:
+        """
+        Fuse heading from odometry and IMU with adaptive weighting
+        
+        Strategy:
+        - If discrepancy is small (< 10°): trust IMU more (80/20)
+        - If discrepancy is medium (10-45°): use 50/50
+        - If discrepancy is large (> 45°): trust odometry (100% odometry)
         """
         # Store headings
         self.last_odom_heading = odom_heading
@@ -255,26 +317,32 @@ class LocalPlanner:
         
         # Calculate discrepancy
         self.heading_discrepancy = self._normalize_angle(odom_heading - imu_heading)
+        discrepancy_deg = abs(math.degrees(self.heading_discrepancy))
         
-        # Check for large discrepancy (might indicate sensor issue)
-        if abs(self.heading_discrepancy) > self.config.max_heading_discrepancy:
+        # Adaptive weighting based on discrepancy
+        if discrepancy_deg < 10:
+            # Small discrepancy: trust IMU more
+            w_imu = 0.8
+        elif discrepancy_deg < 45:
+            # Medium discrepancy: use 50/50
+            w_imu = 0.5
+        else:
+            # Large discrepancy: trust odometry
+            w_imu = 0.0
             logger.warning(
-                f"Large heading discrepancy: {math.degrees(self.heading_discrepancy):.1f}° "
+                f"Large heading discrepancy: {discrepancy_deg:.1f}° "
                 f"(odom={math.degrees(odom_heading):.1f}°, imu={math.degrees(imu_heading):.1f}°)"
             )
-            # Trust odometry more if IMU seems wrong
-            self.fused_heading = odom_heading
-            return odom_heading
         
-        # Weighted fusion
-        w_imu = self.config.imu_heading_weight
+        # Apply weighting
         w_odom = 1.0 - w_imu
         
-        # Use weighted average (handle angle wrapping)
-        fused = w_odom * odom_heading + w_imu * imu_heading
-        
-        # Normalize
-        self.fused_heading = self._normalize_angle(fused)
+        if w_imu > 0:
+            # Weighted average with angle wrapping
+            fused = w_odom * odom_heading + w_imu * imu_heading
+            self.fused_heading = self._normalize_angle(fused)
+        else:
+            self.fused_heading = odom_heading
         
         return self.fused_heading
     
@@ -309,7 +377,7 @@ class LocalPlanner:
         v = max(self.config.min_approach_speed, min(v, self.config.final_approach_speed))
         
         # Limit angular velocity
-        max_w = 0.5  # Maximum angular velocity during final approach
+        max_w = 0.5
         w = max(-max_w, min(w, max_w))
         
         logger.debug(f"Final approach: dist={self.distance_to_goal:.3f}m, "
@@ -347,6 +415,7 @@ class LocalPlanner:
         self._imu_invalid = False
         self.heading_discrepancy = 0.0
         self.fused_heading = 0.0
+        self.correction_active = False
         logger.info("Planner reset")
     
     def get_state(self) -> PlannerState:
@@ -367,7 +436,8 @@ class LocalPlanner:
             'heading_discrepancy': self.heading_discrepancy,
             'fused_heading': self.fused_heading,
             'odom_heading': self.last_odom_heading,
-            'imu_heading': self.last_imu_heading
+            'imu_heading': self.last_imu_heading,
+            'correction_active': self.correction_active
         }
     
     def _is_valid_pose(self, pose: Tuple[float, float, float]) -> bool:
@@ -396,6 +466,10 @@ class LocalPlanner:
         if self.distance_to_goal < self.config.goal_slowdown_distance:
             slowdown_factor = max(0.3, self.distance_to_goal / self.config.goal_slowdown_distance)
             target_v *= slowdown_factor
+        
+        # Reduce speed if cross-track error is large
+        if self.cross_track_error > 0.3:
+            target_v *= 0.5
         
         return target_v
     
