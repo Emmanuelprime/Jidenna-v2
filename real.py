@@ -45,6 +45,34 @@ class PathGenerator:
         return points
     
     @staticmethod
+    def l_shape_path(size=1.0, num_points=20):
+        """
+        Generate L-shaped path (2 turns instead of 4)
+        Easier than square for odometry-based navigation
+        
+        Path: (0,0) → (size,0) → (size,size)
+        """
+        points = []
+        
+        # First segment: go right along X axis
+        n_first = num_points // 2
+        for i in range(n_first):
+            t = i / max(1, n_first - 1)
+            x = t * size
+            y = 0
+            points.append((x, y))
+        
+        # Second segment: go up along Y axis
+        n_second = num_points - n_first
+        for i in range(n_second):
+            t = i / max(1, n_second - 1)
+            x = size
+            y = t * size
+            points.append((x, y))
+        
+        return points
+    
+    @staticmethod
     def smooth_90_turn(start=(0, 0), turn_center=(0.5, 0.5), end=(1, 1), 
                        turn_radius=0.5, num_points=50):
         """
@@ -52,13 +80,6 @@ class PathGenerator:
         
         For a robot with 0.521m wheel separation, minimum turn radius is ~0.26m
         Recommended turn radius: 0.4-0.6m for smooth operation
-        
-        Args:
-            start: Starting point (e.g., (0,0))
-            turn_center: Center of the turning arc (e.g., (0.5, 0.5))
-            end: End point (e.g., (1,1))
-            turn_radius: Radius of the turn (0.5m recommended)
-            num_points: Total number of path points
         """
         points = []
         
@@ -89,11 +110,9 @@ class PathGenerator:
             points.append((x, y))
         
         # Turn section (arc with specified radius)
-        # Calculate start and end angles
         angle_start = math.atan2(dy_start, dx_start)
         angle_end = math.atan2(dy_end, dx_end)
         
-        # Calculate angle difference (shortest path)
         angle_diff = angle_end - angle_start
         while angle_diff > math.pi:
             angle_diff -= 2 * math.pi
@@ -125,15 +144,9 @@ class PathGenerator:
     def square_path(size=1.0, turn_radius=0.4, num_points_per_side=20):
         """
         Generate square path with smooth corners
-        
-        Args:
-            size: Length of each side in meters
-            turn_radius: Radius of corner arcs (0.4m recommended)
-            num_points_per_side: Points per side
         """
         points = []
         
-        # Square corners (clockwise from bottom-left)
         half = size / 2
         corners = [
             (-half, -half),  # Bottom-left
@@ -142,13 +155,11 @@ class PathGenerator:
             (-half, half)    # Top-left
         ]
         
-        # Generate path with rounded corners
         for i in range(4):
             current = corners[i]
             next_corner = corners[(i + 1) % 4]
             prev_corner = corners[(i - 1) % 4]
             
-            # Direction vectors
             dx_in = (current[0] - prev_corner[0])
             dy_in = (current[1] - prev_corner[1])
             dist_in = max(1e-6, math.sqrt(dx_in**2 + dy_in**2))
@@ -161,23 +172,19 @@ class PathGenerator:
             dx_out /= dist_out
             dy_out /= dist_out
             
-            # Calculate turn center (for 90° turn)
             turn_center_x = current[0] + (dx_in - dx_out) * turn_radius
             turn_center_y = current[1] + (dy_in - dy_out) * turn_radius
             
-            # Calculate start and end of arc
             arc_start_x = current[0] - dx_in * turn_radius
             arc_start_y = current[1] - dy_in * turn_radius
             arc_end_x = current[0] + dx_out * turn_radius
             arc_end_y = current[1] + dy_out * turn_radius
             
-            # Straight section before corner
             straight_start = (
                 prev_corner[0] + dx_in * turn_radius,
                 prev_corner[1] + dy_in * turn_radius
             )
             
-            # Generate straight section
             n_straight = num_points_per_side // 2
             for j in range(n_straight):
                 t = j / max(1, n_straight - 1)
@@ -185,12 +192,10 @@ class PathGenerator:
                 y = straight_start[1] + t * (arc_start_y - straight_start[1])
                 points.append((x, y))
             
-            # Generate arc section
             n_arc = num_points_per_side // 2
             angle_start = math.atan2(arc_start_y - turn_center_y, arc_start_x - turn_center_x)
             angle_end = math.atan2(arc_end_y - turn_center_y, arc_end_x - turn_center_x)
             
-            # Ensure correct turn direction
             angle_diff = angle_end - angle_start
             while angle_diff > math.pi:
                 angle_diff -= 2 * math.pi
@@ -204,7 +209,6 @@ class PathGenerator:
                 y = turn_center_y + turn_radius * math.sin(angle)
                 points.append((x, y))
         
-        # Close the square
         points.append(points[0])
         
         return points
@@ -253,11 +257,11 @@ class RealRobotTester:
         
         # Conservative planner config for real robot with IMU
         config = PlannerConfig(
-            lookahead_distance=0.5,  # Increased for smoother turns
+            lookahead_distance=0.5,
             lookahead_min=0.3,
-            lookahead_max=1.0,      # Increased for turns
-            max_linear_velocity=0.2,  # Start VERY slow
-            max_angular_velocity=0.5,  # Limited rotation
+            lookahead_max=1.0,
+            max_linear_velocity=0.2,
+            max_angular_velocity=0.5,
             position_tolerance=0.15,
             heading_tolerance=math.radians(30),
             goal_slowdown_distance=0.4,
@@ -266,7 +270,7 @@ class RealRobotTester:
             imu_heading_weight=0.7,
             max_heading_discrepancy=math.radians(30),
             # Curvature settings
-            max_curvature=3.0,  # Increased for sharper turns
+            max_curvature=3.0,
             final_approach_distance=0.3,
             final_approach_speed=0.1,
             min_approach_speed=0.03
@@ -539,7 +543,7 @@ def main():
     parser = argparse.ArgumentParser(description='Test real robot navigation')
     parser.add_argument('--port', type=str, help='Serial port (e.g., COM3, /dev/ttyUSB0)')
     parser.add_argument('--test', type=str, 
-                       choices=['straight', 'short', 'wide_turn', 'square', 'circle', 's_curve'],
+                       choices=['straight', 'short', 'wide_turn', 'l_shape', 'square', 'circle', 's_curve'],
                        default='short',
                        help='Test to run')
     parser.add_argument('--no-imu', action='store_true', 
@@ -583,6 +587,9 @@ def main():
                 turn_radius=0.5, 
                 num_points=50
             )
+        elif args.test == 'l_shape':
+            # L-shaped path (2 turns instead of 4)
+            path = PathGenerator.l_shape_path(size=1.0, num_points=20)
         elif args.test == 'square':
             # 1m square with 0.4m turn radius
             path = PathGenerator.square_path(size=1.0, turn_radius=0.4)
