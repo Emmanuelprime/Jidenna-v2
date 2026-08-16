@@ -31,7 +31,7 @@ from jidenna import RobotAPI, RobotState
 from navigation import LocalPlanner, PlannerConfig, PlannerState
 
 class PathGenerator:
-    """Path generator with smooth curves"""
+    """Path generator optimized for differential drive robot"""
     
     @staticmethod
     def straight_line(start=(0, 0), end=(3, 0), num_points=30):
@@ -45,93 +45,180 @@ class PathGenerator:
         return points
     
     @staticmethod
-    def smooth_turn(start=(0, 0), turn_point=(0, 1), end=(1, 1), 
-                   turn_radius=0.3, num_points=40):
+    def smooth_90_turn(start=(0, 0), turn_center=(0.5, 0.5), end=(1, 1), 
+                       turn_radius=0.5, num_points=50):
         """
-        Generate smooth 90-degree turn using arc
+        Generate smooth 90-degree turn with proper radius
+        
+        For a robot with 0.521m wheel separation, minimum turn radius is ~0.26m
+        Recommended turn radius: 0.4-0.6m for smooth operation
         
         Args:
-            start: Starting point
-            turn_point: Point where turn begins
-            end: End point
-            turn_radius: Radius of the turning arc
+            start: Starting point (e.g., (0,0))
+            turn_center: Center of the turning arc (e.g., (0.5, 0.5))
+            end: End point (e.g., (1,1))
+            turn_radius: Radius of the turn (0.5m recommended)
             num_points: Total number of path points
         """
         points = []
         
-        # Calculate distances
-        dist_to_turn = math.sqrt((turn_point[0] - start[0])**2 + 
-                                 (turn_point[1] - start[1])**2)
-        dist_after_turn = math.sqrt((end[0] - turn_point[0])**2 + 
-                                    (end[1] - turn_point[1])**2)
+        # Calculate distances from turn center to start/end
+        dx_start = turn_center[0] - start[0]
+        dy_start = turn_center[1] - start[1]
+        dist_start = max(1e-6, math.sqrt(dx_start**2 + dy_start**2))
         
-        # Reduce distances to account for turn radius
-        straight1_dist = max(0, dist_to_turn - turn_radius)
-        straight2_dist = max(0, dist_after_turn - turn_radius)
+        dx_end = end[0] - turn_center[0]
+        dy_end = end[1] - turn_center[1]
+        dist_end = max(1e-6, math.sqrt(dx_end**2 + dy_end**2))
         
         # Number of points for each section
-        n_straight1 = int(num_points * 0.3)
-        n_turn = int(num_points * 0.4)
-        n_straight2 = num_points - n_straight1 - n_turn
+        n_approach = int(num_points * 0.3)
+        n_turn = int(num_points * 0.5)
+        n_depart = num_points - n_approach - n_turn
         
-        # First straight section
-        for i in range(n_straight1):
-            t = i / max(1, n_straight1 - 1)
-            x = start[0] + t * (turn_point[0] - start[0]) * (straight1_dist / dist_to_turn)
-            y = start[1] + t * (turn_point[1] - start[1]) * (straight1_dist / dist_to_turn)
+        # Approach section (straight line to start of turn arc)
+        approach_end = (
+            turn_center[0] + dx_start * turn_radius / dist_start,
+            turn_center[1] + dy_start * turn_radius / dist_start
+        )
+        
+        for i in range(n_approach):
+            t = i / max(1, n_approach - 1)
+            x = start[0] + t * (approach_end[0] - start[0])
+            y = start[1] + t * (approach_end[1] - start[1])
             points.append((x, y))
         
-        # Turning arc (quarter circle)
-        # Determine direction of turn
-        dx1 = turn_point[0] - start[0]
-        dy1 = turn_point[1] - start[1]
-        dx2 = end[0] - turn_point[0]
-        dy2 = end[1] - turn_point[1]
+        # Turn section (arc with specified radius)
+        # Calculate start and end angles
+        angle_start = math.atan2(dy_start, dx_start)
+        angle_end = math.atan2(dy_end, dx_end)
         
-        # Cross product to determine turn direction
-        cross = dx1 * dy2 - dy1 * dx2
-        turn_direction = 1 if cross > 0 else -1
+        # Calculate angle difference (shortest path)
+        angle_diff = angle_end - angle_start
+        while angle_diff > math.pi:
+            angle_diff -= 2 * math.pi
+        while angle_diff < -math.pi:
+            angle_diff += 2 * math.pi
         
-        # Arc center
-        if abs(dx1) > abs(dy1):
-            # Moving mostly in X direction
-            if dx1 > 0:
-                center_x = turn_point[0] - turn_radius
-            else:
-                center_x = turn_point[0] + turn_radius
-            center_y = turn_point[1]
-            start_angle = math.pi if dx1 > 0 else 0
-        else:
-            # Moving mostly in Y direction
-            center_x = turn_point[0]
-            if dy1 > 0:
-                center_y = turn_point[1] - turn_radius
-            else:
-                center_y = turn_point[1] + turn_radius
-            start_angle = math.pi/2 if dy1 > 0 else -math.pi/2
-        
-        # Generate arc points
         for i in range(n_turn):
             t = i / max(1, n_turn - 1)
-            angle = start_angle + turn_direction * (math.pi/2) * t
-            x = center_x + turn_radius * math.cos(angle)
-            y = center_y + turn_radius * math.sin(angle)
+            angle = angle_start + angle_diff * t
+            x = turn_center[0] + turn_radius * math.cos(angle)
+            y = turn_center[1] + turn_radius * math.sin(angle)
             points.append((x, y))
         
-        # Second straight section
-        for i in range(n_straight2):
-            t = i / max(1, n_straight2 - 1)
-            x = turn_point[0] + t * (end[0] - turn_point[0]) * (straight2_dist / dist_after_turn)
-            y = turn_point[1] + t * (end[1] - turn_point[1]) * (straight2_dist / dist_after_turn)
+        # Depart section (straight line from end of turn arc)
+        depart_start = (
+            turn_center[0] + dx_end * turn_radius / dist_end,
+            turn_center[1] + dy_end * turn_radius / dist_end
+        )
+        
+        for i in range(n_depart):
+            t = i / max(1, n_depart - 1)
+            x = depart_start[0] + t * (end[0] - depart_start[0])
+            y = depart_start[1] + t * (end[1] - depart_start[1])
             points.append((x, y))
         
         return points
     
     @staticmethod
-    def right_angle_path(start=(0, 0), intermediate=(0, 2), end=(3, 2), 
-                        turn_radius=0.3, num_points=40):
-        """Generate 90-degree path with smooth turn"""
-        return PathGenerator.smooth_turn(start, intermediate, end, turn_radius, num_points)
+    def square_path(size=1.0, turn_radius=0.4, num_points_per_side=20):
+        """
+        Generate square path with smooth corners
+        
+        Args:
+            size: Length of each side in meters
+            turn_radius: Radius of corner arcs (0.4m recommended)
+            num_points_per_side: Points per side
+        """
+        points = []
+        
+        # Square corners (clockwise from bottom-left)
+        half = size / 2
+        corners = [
+            (-half, -half),  # Bottom-left
+            (half, -half),   # Bottom-right
+            (half, half),    # Top-right
+            (-half, half)    # Top-left
+        ]
+        
+        # Generate path with rounded corners
+        for i in range(4):
+            current = corners[i]
+            next_corner = corners[(i + 1) % 4]
+            prev_corner = corners[(i - 1) % 4]
+            
+            # Direction vectors
+            dx_in = (current[0] - prev_corner[0])
+            dy_in = (current[1] - prev_corner[1])
+            dist_in = max(1e-6, math.sqrt(dx_in**2 + dy_in**2))
+            dx_in /= dist_in
+            dy_in /= dist_in
+            
+            dx_out = (next_corner[0] - current[0])
+            dy_out = (next_corner[1] - current[1])
+            dist_out = max(1e-6, math.sqrt(dx_out**2 + dy_out**2))
+            dx_out /= dist_out
+            dy_out /= dist_out
+            
+            # Calculate turn center (for 90° turn)
+            turn_center_x = current[0] + (dx_in - dx_out) * turn_radius
+            turn_center_y = current[1] + (dy_in - dy_out) * turn_radius
+            
+            # Calculate start and end of arc
+            arc_start_x = current[0] - dx_in * turn_radius
+            arc_start_y = current[1] - dy_in * turn_radius
+            arc_end_x = current[0] + dx_out * turn_radius
+            arc_end_y = current[1] + dy_out * turn_radius
+            
+            # Straight section before corner
+            straight_start = (
+                prev_corner[0] + dx_in * turn_radius,
+                prev_corner[1] + dy_in * turn_radius
+            )
+            
+            # Generate straight section
+            n_straight = num_points_per_side // 2
+            for j in range(n_straight):
+                t = j / max(1, n_straight - 1)
+                x = straight_start[0] + t * (arc_start_x - straight_start[0])
+                y = straight_start[1] + t * (arc_start_y - straight_start[1])
+                points.append((x, y))
+            
+            # Generate arc section
+            n_arc = num_points_per_side // 2
+            angle_start = math.atan2(arc_start_y - turn_center_y, arc_start_x - turn_center_x)
+            angle_end = math.atan2(arc_end_y - turn_center_y, arc_end_x - turn_center_x)
+            
+            # Ensure correct turn direction
+            angle_diff = angle_end - angle_start
+            while angle_diff > math.pi:
+                angle_diff -= 2 * math.pi
+            while angle_diff < -math.pi:
+                angle_diff += 2 * math.pi
+            
+            for j in range(n_arc):
+                t = j / max(1, n_arc - 1)
+                angle = angle_start + angle_diff * t
+                x = turn_center_x + turn_radius * math.cos(angle)
+                y = turn_center_y + turn_radius * math.sin(angle)
+                points.append((x, y))
+        
+        # Close the square
+        points.append(points[0])
+        
+        return points
+    
+    @staticmethod
+    def circle(center=(0, 0), radius=1.0, num_points=50):
+        """Generate circular path"""
+        points = []
+        for i in range(num_points):
+            angle = (2 * math.pi * i) / (num_points - 1)
+            x = center[0] + radius * math.cos(angle)
+            y = center[1] + radius * math.sin(angle)
+            points.append((x, y))
+        return points
     
     @staticmethod
     def s_curve(start=(0, 0), end=(3, 0), amplitude=0.5, num_points=40):
@@ -141,17 +228,6 @@ class PathGenerator:
             t = i / (num_points - 1)
             x = start[0] + t * (end[0] - start[0])
             y = start[1] + t * (end[1] - start[1]) + amplitude * math.sin(math.pi * t)
-            points.append((x, y))
-        return points
-    
-    @staticmethod
-    def circle(center=(0, 0), radius=1.0, num_points=40):
-        """Generate circular path"""
-        points = []
-        for i in range(num_points):
-            angle = (2 * math.pi * i) / (num_points - 1)
-            x = center[0] + radius * math.cos(angle)
-            y = center[1] + radius * math.sin(angle)
             points.append((x, y))
         return points
 
@@ -463,7 +539,7 @@ def main():
     parser = argparse.ArgumentParser(description='Test real robot navigation')
     parser.add_argument('--port', type=str, help='Serial port (e.g., COM3, /dev/ttyUSB0)')
     parser.add_argument('--test', type=str, 
-                       choices=['straight', 'short', 'turn', 'smooth_turn', 'square'],
+                       choices=['straight', 'short', 'wide_turn', 'square', 'circle', 's_curve'],
                        default='short',
                        help='Test to run')
     parser.add_argument('--no-imu', action='store_true', 
@@ -493,31 +569,29 @@ def main():
         if not tester.connect():
             return
         
-        # Define test paths
+        # Define test paths with proper turn radii
         if args.test == 'straight':
             path = PathGenerator.straight_line(start=(0, 0), end=(2, 0), num_points=20)
         elif args.test == 'short':
             path = PathGenerator.straight_line(start=(0, 0), end=(1, 0), num_points=10)
-        elif args.test == 'turn':
-            # Old sharp turn (for comparison)
-            path = PathGenerator.right_angle_path(
-                start=(0, 0), intermediate=(0, 1), end=(1, 1), 
-                turn_radius=0.1, num_points=20
-            )
-        elif args.test == 'smooth_turn':
-            # New smooth turn
-            path = PathGenerator.smooth_turn(
-                start=(0, 0), turn_point=(0, 1), end=(1, 1), 
-                turn_radius=0.3, num_points=30
+        elif args.test == 'wide_turn':
+            # Wide turn with 0.5m radius (recommended for this robot)
+            path = PathGenerator.smooth_90_turn(
+                start=(0, 0), 
+                turn_center=(0.5, 0.5), 
+                end=(1, 1), 
+                turn_radius=0.5, 
+                num_points=50
             )
         elif args.test == 'square':
-            # 1m square with smooth corners
-            path = [
-                (0, 0), (0.25, 0), (0.5, 0), (0.75, 0), (1, 0),
-                (1, 0.25), (1, 0.5), (1, 0.75), (1, 1),
-                (0.75, 1), (0.5, 1), (0.25, 1), (0, 1),
-                (0, 0.75), (0, 0.5), (0, 0.25), (0, 0)
-            ]
+            # 1m square with 0.4m turn radius
+            path = PathGenerator.square_path(size=1.0, turn_radius=0.4)
+        elif args.test == 'circle':
+            # Circle with 1m radius
+            path = PathGenerator.circle(radius=1.0, num_points=50)
+        elif args.test == 's_curve':
+            # S-curve
+            path = PathGenerator.s_curve(start=(0, 0), end=(2, 0), amplitude=0.3, num_points=40)
         
         logger.info(f"Test path: {args.test}")
         logger.info(f"Path length: {len(path)} points")
@@ -530,7 +604,7 @@ def main():
         
         input("Press ENTER to start test...")
         
-        results = tester.run_safe_test(path, f"real_{args.test}", max_duration=20.0)
+        results = tester.run_safe_test(path, f"real_{args.test}", max_duration=30.0)
         
         logger.info("\n" + "="*50)
         logger.info("TEST RESULTS")
