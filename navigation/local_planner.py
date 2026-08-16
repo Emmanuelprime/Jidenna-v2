@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 from .path import Path
-from .pure_pursuite import PurePursuit
+from .pure_pursuit import PurePursuit
 from .controller import SpeedController
 
 logger = logging.getLogger(__name__)
@@ -49,13 +49,13 @@ class PlannerConfig:
     
     # IMU/Sensor fusion
     use_imu_heading: bool = True
-    imu_heading_weight: float = 0.8  # Increased from 0.7 for better heading
-    max_heading_discrepancy: float = math.radians(45)  # Increased from 30 to allow more IMU trust
+    imu_heading_weight: float = 0.9  # 90% IMU, 10% odometry
+    max_heading_discrepancy: float = math.radians(90)  # Only reject IMU if > 90° off
     
     # Position correction
-    position_correction_gain: float = 1.5  # Aggressive correction when off path
-    max_cross_track_error: float = 0.5  # Maximum allowed cross-track error before strong correction
-    correction_start_distance: float = 0.1  # Start correcting when off path by this much
+    position_correction_gain: float = 2.0  # More aggressive correction
+    max_cross_track_error: float = 0.5
+    correction_start_distance: float = 0.08  # Start correcting earlier
 
 class LocalPlanner:
     """Local path planner for differential drive robot"""
@@ -153,7 +153,7 @@ class LocalPlanner:
             logger.warning("Odometry was invalid, but now recovering")
             self._odometry_invalid = False
         
-        # Fuse heading from odometry and IMU
+        # Fuse heading from odometry and IMU (IMU primary)
         heading = self._fuse_heading(robot_pose[2], imu_heading)
         
         # Create fused pose
@@ -290,19 +290,21 @@ class LocalPlanner:
         correction = self.config.position_correction_gain * local_y
         
         # Limit correction magnitude
-        max_correction = 1.0  # Maximum correction curvature
+        max_correction = 1.5  # Maximum correction curvature (increased)
         correction = max(-max_correction, min(correction, max_correction))
         
         return correction
     
     def _fuse_heading(self, odom_heading: float, imu_heading: Optional[float]) -> float:
         """
-        Fuse heading from odometry and IMU with adaptive weighting
+        Fuse heading with IMU as primary source
+        
+        IMU is more accurate for heading, especially during turns
+        Odometry drifts significantly with each turn
         
         Strategy:
-        - If discrepancy is small (< 10°): trust IMU more (80/20)
-        - If discrepancy is medium (10-45°): use 50/50
-        - If discrepancy is large (> 45°): trust odometry (100% odometry)
+        - Trust IMU 90% by default
+        - Only fall back to odometry if IMU seems completely wrong (> 90° off)
         """
         # Store headings
         self.last_odom_heading = odom_heading
@@ -319,30 +321,20 @@ class LocalPlanner:
         self.heading_discrepancy = self._normalize_angle(odom_heading - imu_heading)
         discrepancy_deg = abs(math.degrees(self.heading_discrepancy))
         
-        # Adaptive weighting based on discrepancy
-        if discrepancy_deg < 10:
-            # Small discrepancy: trust IMU more
-            w_imu = 0.8
-        elif discrepancy_deg < 45:
-            # Medium discrepancy: use 50/50
-            w_imu = 0.5
-        else:
-            # Large discrepancy: trust odometry
-            w_imu = 0.0
-            logger.warning(
-                f"Large heading discrepancy: {discrepancy_deg:.1f}° "
-                f"(odom={math.degrees(odom_heading):.1f}°, imu={math.degrees(imu_heading):.1f}°)"
-            )
-        
-        # Apply weighting
-        w_odom = 1.0 - w_imu
-        
-        if w_imu > 0:
-            # Weighted average with angle wrapping
-            fused = w_odom * odom_heading + w_imu * imu_heading
-            self.fused_heading = self._normalize_angle(fused)
-        else:
+        # Use IMU as primary heading source
+        if discrepancy_deg > 90:
+            # IMU might be completely wrong (very unlikely for MPU6050)
+            logger.warning(f"Extreme heading discrepancy: {discrepancy_deg:.1f}° - checking sensors")
             self.fused_heading = odom_heading
+        else:
+            # Trust IMU heavily (90% IMU, 10% odometry)
+            w_odom = 1.0 - self.config.imu_heading_weight  # 0.1
+            fused = imu_heading + w_odom * self.heading_discrepancy
+            self.fused_heading = self._normalize_angle(fused)
+            
+            # Log only if discrepancy is large
+            if discrepancy_deg > 45:
+                logger.debug(f"Heading discrepancy: {discrepancy_deg:.1f}° - trusting IMU")
         
         return self.fused_heading
     
