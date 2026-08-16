@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 from .path import Path
-from .pure_pursuit import PurePursuit
+from .pure_pursuite import PurePursuit
 from .controller import SpeedController
 
 logger = logging.getLogger(__name__)
