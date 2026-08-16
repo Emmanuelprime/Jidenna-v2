@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 from .path import Path
-from .pure_pursuite import PurePursuit
+from .pure_pursuit import PurePursuit
 from .controller import SpeedController
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,11 @@ class PlannerConfig:
     max_linear_velocity: float = 0.4
     max_angular_velocity: float = 1.0
     min_linear_velocity: float = 0.0
+    
+    # Acceleration limits
+    max_linear_acceleration: float = 0.3  # m/s² (smooth acceleration)
+    max_angular_acceleration: float = 0.5  # rad/s² (smooth turning)
+    max_lateral_acceleration: float = 0.3  # m/s² (for turn speed calculation)
     
     # Goal tolerances
     position_tolerance: float = 0.15
@@ -56,6 +61,10 @@ class PlannerConfig:
     position_correction_gain: float = 2.0  # More aggressive correction
     max_cross_track_error: float = 0.5
     correction_start_distance: float = 0.08  # Start correcting earlier
+    
+    # Control loop
+    control_frequency: float = 20.0  # Hz
+    control_dt: float = 0.05  # seconds (1/control_frequency)
 
 class LocalPlanner:
     """Local path planner for differential drive robot"""
@@ -76,7 +85,10 @@ class LocalPlanner:
         self.speed_controller = SpeedController(
             max_linear_velocity=self.config.max_linear_velocity,
             max_angular_velocity=self.config.max_angular_velocity,
-            min_linear_velocity=self.config.min_linear_velocity
+            min_linear_velocity=self.config.min_linear_velocity,
+            max_lateral_acceleration=self.config.max_lateral_acceleration,
+            max_linear_acceleration=self.config.max_linear_acceleration,
+            max_angular_acceleration=self.config.max_angular_acceleration
         )
         
         # Internal state
@@ -112,6 +124,7 @@ class LocalPlanner:
             self.state = PlannerState.RUNNING
             self._stop_requested = False
             self.correction_active = False
+            self.speed_controller.reset()  # Reset acceleration limiting
             logger.info(f"New path set with {len(path_points)} points")
         except ValueError as e:
             logger.error(f"Invalid path: {e}")
@@ -133,6 +146,7 @@ class LocalPlanner:
         if self._stop_requested:
             self.state = PlannerState.STOPPED
             self.last_velocity_command = (0.0, 0.0)
+            self.speed_controller.reset()  # Reset for smooth restart
             return self.last_velocity_command
         
         # Check if we have a valid path
@@ -185,6 +199,7 @@ class LocalPlanner:
         if self.distance_to_goal < self.config.position_tolerance:
             self.state = PlannerState.GOAL_REACHED
             self.last_velocity_command = (0.0, 0.0)
+            self.speed_controller.reset()  # Reset for next path
             logger.info(f"Goal reached! Distance: {self.distance_to_goal:.3f}m")
             return self.last_velocity_command
         
@@ -193,6 +208,7 @@ class LocalPlanner:
         if remaining_path_distance < 0.01:
             self.state = PlannerState.GOAL_REACHED
             self.last_velocity_command = (0.0, 0.0)
+            self.speed_controller.reset()
             logger.info("Path completed")
             return self.last_velocity_command
         
@@ -253,10 +269,11 @@ class LocalPlanner:
         if self.correction_active:
             target_velocity *= 0.7  # Slow down for correction
         
-        # Apply speed control
+        # Apply speed control with acceleration limiting
         v, w = self.speed_controller.compute_velocity(
             target_velocity, curvature, self.distance_to_goal,
-            self.config.goal_slowdown_distance
+            self.config.goal_slowdown_distance,
+            dt=self.config.control_dt
         )
         
         # Set state
@@ -383,6 +400,7 @@ class LocalPlanner:
         self._stop_requested = True
         self.state = PlannerState.STOPPED
         self.last_velocity_command = (0.0, 0.0)
+        self.speed_controller.reset()  # Reset for smooth restart
         logger.info("Stop requested")
     
     def resume(self):
@@ -408,6 +426,7 @@ class LocalPlanner:
         self.heading_discrepancy = 0.0
         self.fused_heading = 0.0
         self.correction_active = False
+        self.speed_controller.reset()
         logger.info("Planner reset")
     
     def get_state(self) -> PlannerState:
@@ -416,7 +435,7 @@ class LocalPlanner:
     
     def get_debug_info(self) -> dict:
         """Get debug information about planner"""
-        return {
+        debug_info = {
             'state': self.state.value,
             'current_path_index': self.current_path_index,
             'distance_to_goal': self.distance_to_goal,
@@ -431,6 +450,12 @@ class LocalPlanner:
             'imu_heading': self.last_imu_heading,
             'correction_active': self.correction_active
         }
+        
+        # Add speed controller info
+        speed_info = self.speed_controller.get_debug_info()
+        debug_info.update(speed_info)
+        
+        return debug_info
     
     def _is_valid_pose(self, pose: Tuple[float, float, float]) -> bool:
         """Check if pose is valid"""
