@@ -575,7 +575,7 @@ def main():
         
         # Define test paths with proper turn radii
         if args.test == 'straight':
-            path = PathGenerator.straight_line(start=(0, 0), end=(2, 0), num_points=20)
+            path = PathGenerator.straight_line(start=(0, 0), end=(2, 0), num_points=10)
             print(path)
         elif args.test == 'short':
             path = PathGenerator.straight_line(start=(0, 0), end=(1, 0), num_points=10)
