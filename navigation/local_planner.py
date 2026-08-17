@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from .path import Path
 from .pure_pursuite import PurePursuit
 from .controller import SpeedController
-from .occupancy_grid import OccupancyGrid
-from .cost_map import CostMap
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +28,7 @@ class PlannerConfig:
     max_curvature_rate: float = 2.0  # Maximum rate of curvature change (1/m²)
     
     # Speed limits
-    max_linear_velocity: float = 0.5
+    max_linear_velocity: float = 0.4
     max_angular_velocity: float = 1.0
     min_linear_velocity: float = 0.0
     
@@ -69,12 +67,6 @@ class PlannerConfig:
     # Control loop
     control_frequency: float = 20.0  # Hz
     control_dt: float = 0.05  # seconds (1/control_frequency)
-    # Occupancy grid / cost map
-    map_width: float = 10.0
-    map_height: float = 10.0
-    map_resolution: float = 0.05
-    inflation_radius: float = 0.3
-    obstacle_cost_threshold: float = 0.3
 
 class LocalPlanner:
     """Local path planner for differential drive robot"""
@@ -102,14 +94,6 @@ class LocalPlanner:
             max_linear_acceleration=self.config.max_linear_acceleration,
             max_angular_acceleration=self.config.max_angular_acceleration
         )
-
-        # Occupancy grid and cost map for obstacle awareness
-        self.occupancy_grid = OccupancyGrid(
-            width_m=self.config.map_width,
-            height_m=self.config.map_height,
-            resolution=self.config.map_resolution
-        )
-        self.cost_map = CostMap(self.occupancy_grid, inflation_radius=self.config.inflation_radius)
         
         # Internal state
         self.state = PlannerState.IDLE
@@ -152,8 +136,7 @@ class LocalPlanner:
             self.state = PlannerState.ERROR
     
     def update(self, robot_pose: Tuple[float, float, float], 
-               imu_heading: Optional[float] = None,
-               sensor_readings: Optional[List[Tuple[float, float]]] = None) -> Tuple[float, float]:
+               imu_heading: Optional[float] = None) -> Tuple[float, float]:
         """
         Update planner and compute velocity command
         
@@ -194,13 +177,6 @@ class LocalPlanner:
         
         # Create fused pose
         fused_pose = (robot_pose[0], robot_pose[1], heading)
-
-        # Update occupancy grid / cost map if sensor readings are provided
-        if sensor_readings:
-            try:
-                self.process_sensor_readings(sensor_readings, fused_pose)
-            except Exception:
-                logger.exception("Error processing sensor readings")
         
         # Find nearest point on path
         nearest_index, nearest_distance = self.path.get_nearest_point((fused_pose[0], fused_pose[1]))
@@ -302,19 +278,6 @@ class LocalPlanner:
         # Reduce speed during correction
         if self.correction_active:
             target_velocity *= 0.7  # Slow down for correction
-
-        # Reduce speed if lookahead point lies in high-cost area
-        try:
-            if hasattr(self, 'cost_map') and self.last_lookahead_point is not None:
-                cost_at_lookahead = self.cost_map.get_cost_at_world(self.last_lookahead_point[0],
-                                                                    self.last_lookahead_point[1])
-                if cost_at_lookahead > 0.0:
-                    # Reduce speed proportionally to cost (cost in [0,1])
-                    factor = max(0.05, 1.0 - cost_at_lookahead)
-                    target_velocity *= factor
-                    logger.debug(f"Obstacle cost {cost_at_lookahead:.3f} -> speed factor {factor:.2f}")
-        except Exception:
-            logger.exception("Error checking cost map for lookahead point")
         
         # Apply speed control with acceleration limiting
         v, w = self.speed_controller.compute_velocity(
