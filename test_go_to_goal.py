@@ -1,480 +1,488 @@
 #!/usr/bin/env python3
 """
-Test script for Local Planner with Pure Pursuit - Go to Goal
+Simple Go-to-Goal Test Script
 
-This script allows you to set a goal (x, y) and the robot will navigate to it
-using the local planner with pure pursuit path tracking.
+Allows you to set a single goal (x, y) and navigate there using the local planner.
+Uses the existing PathGenerator to create a straight-line path to the goal.
 
 Usage:
-    python test_go_to_goal.py [--goal X Y] [--simulate] [--port PORT]
-
-Examples:
-    # Simulate navigation to goal (1.0, 1.0)
-    python test_go_to_goal.py --goal 1.0 1.0 --simulate
-    
-    # Real robot navigation to goal (2.0, 3.0)
-    python test_go_to_goal.py --goal 2.0 3.0 --port /dev/ttyUSB0
+    python go_to_goal.py --goal 1.0 1.0 --simulate
+    python go_to_goal.py --goal 2.0 3.0 --port /dev/ttyUSB0
+    python go_to_goal.py --goal 1.5 0.5 --port COM3 --no-imu
 """
 
-import sys
-import time
 import math
+import time
 import argparse
 import logging
-import threading
-from typing import Tuple, Optional
+import sys
+import os
+from typing import Tuple, List, Optional
 from dataclasses import dataclass
 
-# Set up logging
+# Add parent directory to path if needed
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from jidenna import RobotAPI, RobotState
+    from navigation import LocalPlanner, PlannerConfig, PlannerState
+except ImportError:
+    print("Error: Could not import jidenna or navigation modules")
+    print("Make sure you're running from the correct directory")
+    sys.exit(1)
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Import robot modules
-try:
-    from jidenna.robot import RobotAPI
-    from jidenna.state import RobotState
-    from navigation.local_planner import LocalPlanner, PlannerConfig, PlannerState
-    from navigation.path import Path
-    from jidenna.sensors import UltrasonicAPI
-except ImportError as e:
-    logger.error(f"Failed to import robot modules: {e}")
-    logger.error("Make sure you're running from the correct directory")
-    sys.exit(1)
 
-
-@dataclass
-class NavigationStatus:
-    """Navigation status tracking"""
-    goal_x: float = 0.0
-    goal_y: float = 0.0
-    current_x: float = 0.0
-    current_y: float = 0.0
-    distance_to_goal: float = float('inf')
-    state: str = "IDLE"
-    velocity: Tuple[float, float] = (0.0, 0.0)
-    elapsed_time: float = 0.0
-    is_navigating: bool = False
-    is_goal_reached: bool = False
+class SimplePathGenerator:
+    """Simple path generator for straight-line paths to goal"""
     
-    def __str__(self) -> str:
-        return (f"Goal: ({self.goal_x:.2f}, {self.goal_y:.2f}) | "
-                f"Position: ({self.current_x:.2f}, {self.current_y:.2f}) | "
-                f"Distance: {self.distance_to_goal:.3f}m | "
-                f"State: {self.state} | "
-                f"v: {self.velocity[0]:.3f}, w: {self.velocity[1]:.3f}")
-
-
-class GoToGoal:
-    """
-    Go to goal controller using Local Planner and Pure Pursuit
-    """
-    
-    def __init__(self, 
-                 robot_api: Optional[RobotAPI] = None,
-                 ultrasonic_api: Optional[UltrasonicAPI] = None,
-                 simulate: bool = False,
-                 planner_config: Optional[PlannerConfig] = None):
+    @staticmethod
+    def straight_line_to_goal(start: Tuple[float, float], 
+                              goal: Tuple[float, float],
+                              num_points: int = 30) -> List[Tuple[float, float]]:
         """
-        Initialize Go to Goal controller
+        Generate straight-line path from start to goal
         
         Args:
-            robot_api: RobotAPI instance for real robot
-            ultrasonic_api: UltrasonicAPI instance for sensors
-            simulate: If True, run in simulation mode
-            planner_config: Custom planner configuration
-        """
-        self.robot_api = robot_api
-        self.ultrasonic_api = ultrasonic_api
-        self.simulate = simulate
-        
-        # Create planner with configuration
-        if planner_config is None:
-            # Tuned for smooth navigation
-            config = PlannerConfig()
-            config.lookahead_distance = 0.4
-            config.lookahead_min = 0.25
-            config.lookahead_max = 0.8
-            config.max_linear_velocity = 0.3
-            config.max_angular_velocity = 0.8
-            config.max_linear_acceleration = 0.25
-            config.max_angular_acceleration = 0.4
-            config.position_tolerance = 0.12
-            config.heading_tolerance = math.radians(20)
-            config.goal_slowdown_distance = 0.4
-            config.final_approach_distance = 0.25
-            config.position_correction_gain = 2.5
-            config.control_frequency = 20.0
-            config.control_dt = 0.05
-        else:
-            config = planner_config
-            
-        self.planner = LocalPlanner(config)
-        
-        # Navigation state
-        self.status = NavigationStatus()
-        self._running = False
-        self._control_thread = None
-        self._lock = threading.Lock()
-        
-        # For simulation
-        self.sim_pose = (0.0, 0.0, 0.0)
-        self.sim_time = 0.0
-        
-        # Path generated from goal
-        self.path_points = []
-        
-        logger.info("GoToGoal initialized")
-        if simulate:
-            logger.info("Running in SIMULATION mode")
-        else:
-            logger.info("Running in REAL ROBOT mode")
-    
-    def set_goal(self, x: float, y: float) -> bool:
-        """
-        Set goal position and start navigation
-        
-        Args:
-            x: Goal X position in meters
-            y: Goal Y position in meters
-            
-        Returns:
-            True if goal set successfully
-        """
-        with self._lock:
-            self.status.goal_x = x
-            self.status.goal_y = y
-            self.status.is_navigating = True
-            self.status.is_goal_reached = False
-            self.status.elapsed_time = 0.0
-            
-            # Generate path from current position to goal
-            if self.simulate:
-                current_pos = (self.sim_pose[0], self.sim_pose[1])
-            else:
-                state = self.robot_api.get_state()
-                current_pos = (state.x, state.y)
-            
-            # Create a simple straight-line path to goal with some waypoints
-            self.path_points = self._generate_path(current_pos, (x, y))
-            
-            # Set path in planner
-            self.planner.set_path(self.path_points)
-            
-            logger.info(f"Goal set to ({x:.2f}, {y:.2f})")
-            logger.info(f"Path has {len(self.path_points)} waypoints")
-            
-            return True
-    
-    def _generate_path(self, start: Tuple[float, float], goal: Tuple[float, float]) -> list:
-        """
-        Generate a path from start to goal with waypoints
-        
-        Args:
-            start: (x, y) start position
+            start: (x, y) starting position
             goal: (x, y) goal position
+            num_points: Number of waypoints
             
         Returns:
             List of (x, y) waypoints
         """
-        dx = goal[0] - start[0]
-        dy = goal[1] - start[1]
-        distance = math.sqrt(dx*dx + dy*dy)
-        
-        if distance < 0.01:
-            return [start, goal]
-        
-        # Generate waypoints along straight line
-        num_points = max(2, int(distance / 0.15))  # One waypoint every 15cm
-        waypoints = []
-        
-        for i in range(num_points + 1):
-            t = i / num_points
-            x = start[0] + t * dx
-            y = start[1] + t * dy
-            waypoints.append((x, y))
-        
-        # Add a slight overshoot to ensure we pass through goal
-        # This helps with final approach
-        if distance > 0.5:
-            overshoot = 0.05  # 5cm overshoot
-            if overshoot < distance * 0.1:
-                overshoot_x = goal[0] + overshoot * dx / distance
-                overshoot_y = goal[1] + overshoot * dy / distance
-                waypoints.append((overshoot_x, overshoot_y))
-        
-        return waypoints
+        points = []
+        for i in range(num_points):
+            t = i / (num_points - 1)
+            x = start[0] + t * (goal[0] - start[0])
+            y = start[1] + t * (goal[1] - start[1])
+            points.append((x, y))
+        return points
+
+
+@dataclass
+class NavigationStatus:
+    """Current navigation status"""
+    goal: Tuple[float, float] = (0.0, 0.0)
+    position: Tuple[float, float] = (0.0, 0.0)
+    heading: float = 0.0
+    distance_to_goal: float = float('inf')
+    state: str = "IDLE"
+    velocity: Tuple[float, float] = (0.0, 0.0)
+    elapsed_time: float = 0.0
+    is_goal_reached: bool = False
     
-    def start(self):
-        """Start the control loop"""
-        if self._running:
-            logger.warning("Control loop already running")
-            return
-        
-        self._running = True
-        self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
-        self._control_thread.start()
-        logger.info("Control loop started")
+    def __str__(self) -> str:
+        return (f"Goal: ({self.goal[0]:.2f}, {self.goal[1]:.2f}) | "
+                f"Pos: ({self.position[0]:.2f}, {self.position[1]:.2f}) | "
+                f"Dist: {self.distance_to_goal:.3f}m | "
+                f"State: {self.state} | "
+                f"v: {self.velocity[0]:.3f}, w: {self.velocity[1]:.3f} | "
+                f"Time: {self.elapsed_time:.1f}s")
+
+
+class GoToGoal:
+    """
+    Simple Go-to-Goal controller
     
-    def stop(self):
-        """Stop the control loop and robot"""
+    Navigates from current position to a specified goal point
+    """
+    
+    def __init__(self, 
+                 robot_api: RobotAPI,
+                 use_imu: bool = True,
+                 config: Optional[PlannerConfig] = None):
+        """
+        Initialize Go-to-Goal controller
+        
+        Args:
+            robot_api: Connected RobotAPI instance
+            use_imu: Enable IMU fusion
+            config: Custom planner configuration (optional)
+        """
+        self.robot = robot_api
+        
+        # Use provided config or create default
+        if config is None:
+            config = PlannerConfig(
+                lookahead_distance=0.4,
+                lookahead_min=0.25,
+                lookahead_max=0.8,
+                max_linear_velocity=0.25,  # Conservative for real robot
+                max_angular_velocity=0.6,
+                max_linear_acceleration=0.2,
+                max_angular_acceleration=0.4,
+                position_tolerance=0.12,
+                heading_tolerance=math.radians(20),
+                goal_slowdown_distance=0.4,
+                final_approach_distance=0.25,
+                final_approach_speed=0.08,
+                min_approach_speed=0.03,
+                use_imu_heading=use_imu,
+                imu_heading_weight=0.7,
+                max_heading_discrepancy=math.radians(30),
+                max_curvature=3.0,
+                position_correction_gain=2.0
+            )
+        
+        self.planner = LocalPlanner(config)
+        self.use_imu = use_imu
+        self.status = NavigationStatus()
         self._running = False
-        if self._control_thread:
-            self._control_thread.join(timeout=2.0)
+        self._goal_set = False
         
-        # Send stop command
-        if not self.simulate and self.robot_api:
-            self.robot_api.stop()
+        # Simulation mode flag
+        self.simulate = False
+        self.sim_pose = (0.0, 0.0, 0.0)
         
-        self.planner.stop()
-        logger.info("Control loop stopped")
+        logger.info("GoToGoal initialized")
+        logger.info(f"IMU Fusion: {'ENABLED' if use_imu else 'DISABLED'}")
     
-    def _control_loop(self):
-        """Main control loop"""
-        loop_rate = 20.0  # Hz
-        dt = 1.0 / loop_rate
-        last_time = time.time()
+    def set_goal(self, x: float, y: float, current_pos: Optional[Tuple[float, float]] = None) -> bool:
+        """
+        Set goal position and generate path
         
-        logger.info(f"Control loop running at {loop_rate} Hz")
+        Args:
+            x: Goal X position (meters)
+            y: Goal Y position (meters)
+            current_pos: Current position (if None, gets from robot)
+            
+        Returns:
+            True if goal set successfully
+        """
+        if current_pos is None:
+            state = self.robot.get_state()
+            current_pos = (state.x, state.y)
         
-        while self._running:
-            try:
+        # Generate straight-line path to goal
+        path = SimplePathGenerator.straight_line_to_goal(
+            start=current_pos,
+            goal=(x, y),
+            num_points=30
+        )
+        
+        # Set path in planner
+        self.planner.set_path(path)
+        
+        # Update status
+        self.status.goal = (x, y)
+        self.status.position = current_pos
+        self.status.is_goal_reached = False
+        self.status.elapsed_time = 0.0
+        self._goal_set = True
+        
+        logger.info(f"🎯 Goal set to ({x:.2f}, {y:.2f})")
+        logger.info(f"📍 Starting from ({current_pos[0]:.2f}, {current_pos[1]:.2f})")
+        logger.info(f"📏 Distance to goal: {self.planner.distance_to_goal:.3f}m")
+        
+        return True
+    
+    def run(self, max_duration: float = 60.0, callback=None) -> NavigationStatus:
+        """
+        Run navigation to goal
+        
+        Args:
+            max_duration: Maximum time in seconds
+            callback: Optional callback function called each loop
+            
+        Returns:
+            NavigationStatus with final results
+        """
+        if not self._goal_set:
+            logger.error("No goal set! Call set_goal() first")
+            return self.status
+        
+        start_time = time.time()
+        self._running = True
+        
+        logger.info("🚀 Starting navigation...")
+        logger.info("Press Ctrl+C to stop")
+        
+        # Get initial IMU heading if available
+        imu_heading = None
+        if self.use_imu:
+            state = self.robot.get_state()
+            if state.is_imu_valid():
+                imu_heading = state.imu_heading
+        
+        # First update to get initial state
+        state = self.robot.get_state()
+        pose = (state.x, state.y, state.heading)
+        self.planner.update(pose, imu_heading)
+        
+        last_log_time = time.time()
+        
+        try:
+            while self._running:
                 current_time = time.time()
-                dt_actual = current_time - last_time
-                last_time = current_time
                 
-                # Get robot pose
-                if self.simulate:
-                    pose = self.sim_pose
-                    imu_heading = pose[2]  # Use heading from sim
-                else:
-                    # Get state from robot
-                    state = self.robot_api.get_state()
-                    pose = (state.x, state.y, state.heading)
-                    imu_heading = state.imu_heading if state.is_imu_valid() else None
+                # Check timeout
+                if current_time - start_time > max_duration:
+                    logger.warning(f"⏱️ Timeout after {max_duration}s")
+                    break
+                
+                # Get robot state
+                state = self.robot.get_state()
+                if not state.is_valid():
+                    logger.error("Invalid robot state!")
+                    break
+                
+                pose = (state.x, state.y, state.heading)
+                
+                # Get IMU heading if available
+                imu_heading = state.imu_heading if (self.use_imu and state.is_imu_valid()) else None
                 
                 # Update planner
                 v, w = self.planner.update(pose, imu_heading)
                 
-                # Get planner state
-                planner_state = self.planner.get_state()
-                
-                # Update status
-                with self._lock:
-                    self.status.current_x = pose[0]
-                    self.status.current_y = pose[1]
-                    self.status.distance_to_goal = self.planner.distance_to_goal
-                    self.status.state = planner_state.value
-                    self.status.velocity = (v, w)
-                    self.status.elapsed_time += dt_actual
-                    self.status.is_goal_reached = (planner_state == PlannerState.GOAL_REACHED)
+                # Safety limits
+                v = max(-0.3, min(v, 0.3))
+                w = max(-0.8, min(w, 0.8))
                 
                 # Send velocity command
-                if not self.simulate:
-                    if self.robot_api:
-                        self.robot_api.set_velocity(v, w)
-                    else:
-                        logger.error("No robot API available")
-                        break
-                else:
-                    # Simulation: update pose
-                    self._update_simulation(v, w, dt_actual)
+                self.robot.set_velocity(v, w)
                 
-                # Log status periodically
-                if current_time - getattr(self, '_last_log_time', 0) > 1.0:
-                    self._last_log_time = current_time
-                    logger.info(str(self.status))
+                # Update status
+                self.status.position = (state.x, state.y)
+                self.status.heading = state.heading
+                self.status.distance_to_goal = self.planner.distance_to_goal
+                self.status.state = self.planner.get_state().value
+                self.status.velocity = (v, w)
+                self.status.elapsed_time = current_time - start_time
+                self.status.is_goal_reached = (self.planner.get_state() == PlannerState.GOAL_REACHED)
                 
-                # Check if goal reached
+                # Call callback if provided
+                if callback:
+                    callback(self.status)
+                
+                # Log progress
+                if current_time - last_log_time > 1.0:
+                    logger.info(f"📊 {self.status}")
+                    last_log_time = current_time
+                
+                # Check goal reached
                 if self.status.is_goal_reached:
-                    logger.info(f"🎯 Goal reached! Position: ({pose[0]:.2f}, {pose[1]:.2f})")
-                    if not self.simulate:
-                        self.robot_api.stop()
-                    self._running = False
+                    logger.info("✅ GOAL REACHED!")
+                    self.robot.stop()
                     break
                 
-                # Sleep to maintain loop rate
-                sleep_time = (1.0 / loop_rate) - dt_actual
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                    
-            except Exception as e:
-                logger.error(f"Control loop error: {e}")
-                import traceback
-                traceback.print_exc()
-                time.sleep(0.1)
+                time.sleep(0.05)
+                
+        except KeyboardInterrupt:
+            logger.info("⏹️ Navigation interrupted by user")
+        except Exception as e:
+            logger.error(f"Navigation error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._running = False
+            self.robot.stop()
+            logger.info("Robot stopped")
+        
+        return self.status
+
+
+class SimulatedRobot:
+    """Simple robot simulation for testing without hardware"""
     
-    def _update_simulation(self, v: float, w: float, dt: float):
-        """
-        Update simulated robot pose
-        
-        Args:
-            v: Linear velocity
-            w: Angular velocity
-            dt: Time step
-        """
-        x, y, heading = self.sim_pose
-        
-        # Update heading
-        heading += w * dt
-        heading = self._normalize_angle(heading)
-        
-        # Update position
-        x += v * math.cos(heading) * dt
-        y += v * math.sin(heading) * dt
-        
-        self.sim_pose = (x, y, heading)
+    def __init__(self):
+        self.x = 0.0
+        self.y = 0.0
+        self.heading = 0.0
+        self.v = 0.0
+        self.w = 0.0
+        self.last_time = time.time()
     
-    def get_status(self) -> NavigationStatus:
-        """Get current navigation status"""
-        with self._lock:
-            return self.status
-    
-    def wait_for_goal(self, timeout: float = 60.0) -> bool:
-        """
-        Wait for goal to be reached
+    def set_velocity(self, v: float, w: float):
+        """Set velocity and update simulation"""
+        current_time = time.time()
+        dt = min(current_time - self.last_time, 0.1)
+        self.last_time = current_time
         
-        Args:
-            timeout: Maximum time to wait in seconds
+        self.v = v
+        self.w = w
+        
+        # Update pose
+        self.heading += w * dt
+        self.x += v * math.cos(self.heading) * dt
+        self.y += v * math.sin(self.heading) * dt
+    
+    def get_state(self):
+        """Get simulated robot state"""
+        class SimState:
+            def __init__(self, x, y, heading):
+                self.x = x
+                self.y = y
+                self.heading = heading
+                self.v = 0.0
+                self.w = 0.0
+                self.is_imu_valid = lambda: False
+                self.imu_heading = 0.0
+                self.is_valid = lambda: True
             
-        Returns:
-            True if goal reached, False if timeout
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if self.status.is_goal_reached:
+            def is_valid(self):
                 return True
-            time.sleep(0.1)
-        return False
+            
+            def is_imu_valid(self):
+                return False
+        
+        return SimState(self.x, self.y, self.heading)
     
-    def _normalize_angle(self, angle: float) -> float:
-        """Normalize angle to [-pi, pi]"""
-        while angle > math.pi:
-            angle -= 2 * math.pi
-        while angle < -math.pi:
-            angle += 2 * math.pi
-        return angle
+    def stop(self):
+        self.v = 0.0
+        self.w = 0.0
+    
+    def disconnect(self):
+        pass
 
 
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description="Go to Goal using Local Planner and Pure Pursuit"
+        description="Go-to-Goal Navigation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Simulate navigation to (1.0, 1.0)
+  python go_to_goal.py --goal 1.0 1.0 --simulate
+  
+  # Real robot navigation to (2.0, 3.0)
+  python go_to_goal.py --goal 2.0 3.0 --port /dev/ttyUSB0
+  
+  # Real robot with custom speed
+  python go_to_goal.py --goal 1.5 0.5 --port COM3 --speed 0.3
+        """
+    )
+    
+    parser.add_argument(
+        '--goal', type=float, nargs=2, required=True,
+        help='Goal position (x y) in meters'
     )
     parser.add_argument(
-        "--goal", type=float, nargs=2, default=[1.0, 1.0],
-        help="Goal position (x y) in meters"
+        '--port', type=str,
+        help='Serial port for robot (e.g., /dev/ttyUSB0, COM3)'
     )
     parser.add_argument(
-        "--simulate", action="store_true",
-        help="Run in simulation mode (no robot)"
+        '--simulate', action='store_true',
+        help='Run in simulation mode (no robot hardware)'
     )
     parser.add_argument(
-        "--port", type=str, default=None,
-        help="Serial port for robot (e.g., /dev/ttyUSB0)"
+        '--no-imu', action='store_true',
+        help='Disable IMU fusion'
     )
     parser.add_argument(
-        "--baud", type=int, default=115200,
-        help="Baud rate for serial communication"
+        '--speed', type=float, default=0.25,
+        help='Maximum linear velocity (m/s)'
     )
     parser.add_argument(
-        "--ultrasonic-port", type=str, default=None,
-        help="Serial port for ultrasonic sensors"
+        '--timeout', type=float, default=60.0,
+        help='Navigation timeout in seconds'
     )
     parser.add_argument(
-        "--timeout", type=float, default=60.0,
-        help="Timeout for navigation in seconds"
+        '--verbose', action='store_true',
+        help='Enable verbose logging'
     )
     parser.add_argument(
-        "--debug", action="store_true",
-        help="Enable debug logging"
+        '--list-ports', action='store_true',
+        help='List available serial ports'
     )
     
     args = parser.parse_args()
     
-    # Set logging level
-    if args.debug:
+    if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    # Initialize robot API (if not in simulation)
-    robot_api = None
-    ultrasonic_api = None
+    # List ports if requested
+    if args.list_ports:
+        try:
+            import serial.tools.list_ports
+            ports = list(serial.tools.list_ports.comports())
+            print("\nAvailable Serial Ports:")
+            for port in ports:
+                print(f"  {port.device}: {port.description}")
+        except ImportError:
+            print("pyserial not installed")
+        return
     
-    if not args.simulate:
-        # Connect to robot
-        robot_api = RobotAPI(args.port, args.baud)
-        if not robot_api.connect():
-            logger.error("Failed to connect to robot")
+    # Setup robot
+    if args.simulate:
+        logger.info("🔬 SIMULATION MODE")
+        robot = SimulatedRobot()
+        use_imu = False
+    else:
+        if not args.port:
+            logger.error("--port required for real robot mode")
             return 1
         
-        logger.info(f"Connected to robot on {args.port or 'auto'}")
+        from jidenna import RobotAPI
+        robot = RobotAPI(args.port)
+        if not robot.connect():
+            logger.error(f"Failed to connect to robot on {args.port}")
+            return 1
         
-        # Connect to ultrasonic sensors if port specified
-        if args.ultrasonic_port:
-            ultrasonic_api = UltrasonicAPI(args.ultrasonic_port)
-            if ultrasonic_api.connect():
-                logger.info(f"Connected to ultrasonic sensors on {args.ultrasonic_port}")
-            else:
-                logger.warning("Failed to connect to ultrasonic sensors")
+        logger.info(f"Connected to robot on {args.port}")
+        use_imu = not args.no_imu
+    
+    # Create custom config with user speed
+    config = PlannerConfig()
+    config.max_linear_velocity = args.speed
+    config.max_angular_velocity = min(0.8, args.speed * 3.0)
+    config.use_imu_heading = use_imu
+    
+    # Create GoToGoal controller
+    gtg = GoToGoal(robot, use_imu=use_imu, config=config)
     
     try:
-        # Create GoToGoal controller
-        controller = GoToGoal(
-            robot_api=robot_api,
-            ultrasonic_api=ultrasonic_api,
-            simulate=args.simulate
-        )
+        # Get current position
+        state = robot.get_state()
+        current_pos = (state.x, state.y)
         
         # Set goal
         goal_x, goal_y = args.goal
-        if not controller.set_goal(goal_x, goal_y):
+        if not gtg.set_goal(goal_x, goal_y, current_pos):
             logger.error("Failed to set goal")
             return 1
         
-        # Start navigation
-        logger.info("Starting navigation...")
-        controller.start()
+        # Run navigation
+        status = gtg.run(max_duration=args.timeout)
         
-        # Wait for goal
-        if controller.wait_for_goal(args.timeout):
-            logger.info("✅ Navigation completed successfully!")
+        # Print results
+        print("\n" + "="*50)
+        print("NAVIGATION RESULTS")
+        print("="*50)
+        print(f"Goal: ({status.goal[0]:.2f}, {status.goal[1]:.2f})")
+        print(f"Final Position: ({status.position[0]:.2f}, {status.position[1]:.2f})")
+        print(f"Final Distance: {status.distance_to_goal:.3f}m")
+        print(f"Time Elapsed: {status.elapsed_time:.1f}s")
+        print(f"Goal Reached: {'✅ YES' if status.is_goal_reached else '❌ NO'}")
+        print(f"Final State: {status.state}")
+        
+        if status.is_goal_reached:
+            print("\n🎯 Success! Robot reached the goal.")
+            return 0
         else:
-            logger.warning(f"⏱️ Navigation timeout after {args.timeout}s")
-        
-        # Stop controller
-        controller.stop()
-        
-        # Print final status
-        status = controller.get_status()
-        print("\n=== Navigation Summary ===")
-        print(f"Goal: ({status.goal_x:.2f}, {status.goal_y:.2f})")
-        print(f"Final position: ({status.current_x:.2f}, {status.current_y:.2f})")
-        print(f"Final distance: {status.distance_to_goal:.3f}m")
-        print(f"Time elapsed: {status.elapsed_time:.1f}s")
-        print(f"Goal reached: {status.is_goal_reached}")
-        
+            print("\n⚠️ Goal not reached. Check robot position and logs.")
+            return 1
+            
     except KeyboardInterrupt:
         logger.info("\nInterrupted by user")
-        if 'controller' in locals():
-            controller.stop()
+        return 1
     except Exception as e:
         logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
         return 1
     finally:
-        # Clean up
-        if robot_api:
-            robot_api.stop()
-            robot_api.disconnect()
+        if not args.simulate:
+            robot.stop()
+            robot.disconnect()
             logger.info("Robot disconnected")
-        if ultrasonic_api:
-            ultrasonic_api.disconnect()
-            logger.info("Ultrasonic sensors disconnected")
-    
-    return 0
 
 
 if __name__ == "__main__":
