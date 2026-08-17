@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 """
-GoToGoal Controller - Direct Heading Control with PID
+GoToGoal Controller - Direct Heading Control with PID and Odometry Reset
 
 This module provides a go-to-goal controller that uses direct heading control
-with PID to navigate to a goal point.
+with PID to navigate to a goal point. It includes odometry reset support for
+improved accuracy when returning to origin.
 
-The robot will:
+Features:
 1. Turn in place to face the goal (PID controlled)
-2. Drive straight to the goal
+2. Drive straight to the goal with heading correction
 3. Slow down as it approaches
-4. Stop precisely at the goal
+4. Optional odometry reset before navigation
+5. Stuck detection and recovery
+6. IMU fusion for heading
+
+Usage:
+    from navigation.g2g import GoToGoal, GoToGoalConfig
+    from jidenna.robot import RobotAPI
+    
+    robot = RobotAPI('/dev/ttyUSB0')
+    robot.connect()
+    
+    gtg = GoToGoal(robot)
+    gtg.go_to(1.0, 1.0)
+    gtg.go_to(0.0, 0.0, reset_odometry=True)  # Reset before return
 """
 
 import math
@@ -46,32 +60,41 @@ class PIDConfig:
 @dataclass
 class GoToGoalConfig:
     """Configuration for GoToGoal controller"""
-    max_linear_speed: float = 0.25
-    max_angular_speed: float = 0.8
-    min_linear_speed: float = 0.02
+    # Speed settings
+    max_linear_speed: float = 0.25      # m/s
+    max_angular_speed: float = 0.8      # rad/s
+    min_linear_speed: float = 0.02      # m/s
     
+    # PID settings for turning
     turn_pid: PIDConfig = field(default_factory=lambda: PIDConfig(
         kp=2.5, ki=0.1, kd=0.05, integral_clamp=0.5, output_limit=0.8
     ))
     
+    # PID settings for driving correction
     drive_pid: PIDConfig = field(default_factory=lambda: PIDConfig(
         kp=0.8, ki=0.02, kd=0.02, integral_clamp=0.1, output_limit=0.3
     ))
     
-    position_tolerance: float = 0.12
-    turn_tolerance: float = 0.05
-    slowdown_distance: float = 0.5
-    approach_distance: float = 0.25
+    # Goal settings
+    position_tolerance: float = 0.12    # meters
+    turn_tolerance: float = 0.05        # radians (2.86 deg)
+    slowdown_distance: float = 0.5      # meters
+    approach_distance: float = 0.25     # meters
     
-    turn_timeout: float = 8.0
-    control_rate: float = 20.0
-    max_time: float = 60.0
+    # Timing
+    turn_timeout: float = 8.0           # seconds
+    control_rate: float = 20.0          # Hz
+    max_time: float = 60.0              # seconds
     
+    # IMU fusion
     use_imu: bool = True
     imu_weight: float = 0.9
     
-    max_heading_error: float = math.radians(170)
-    stuck_threshold: float = 2.0
+    # Stuck detection
+    stuck_threshold: float = 2.0        # seconds without progress
+    
+    # Odometry reset
+    reset_before_goal: bool = False     # Reset before going to goal
 
 
 class PIDController:
@@ -114,22 +137,28 @@ class PIDController:
 
 
 class GoToGoal:
-    """Go-to-Goal controller with direct heading control"""
+    """
+    Go-to-Goal controller with direct heading control and odometry reset
+    """
     
     def __init__(self, robot_api, config: Optional[GoToGoalConfig] = None):
         self.robot = robot_api
         self.config = config if config else GoToGoalConfig()
         
+        # PID controllers
         self.turn_pid = PIDController(self.config.turn_pid)
         self.drive_pid = PIDController(self.config.drive_pid)
         
+        # State
         self.state = GoToGoalState.IDLE
         self.goal = (0.0, 0.0)
+        self.start_pose = (0.0, 0.0, 0.0)
         self.distance_to_goal = float('inf')
         self.heading_error = 0.0
         self.elapsed_time = 0.0
         self.total_distance_traveled = 0.0
         
+        # Internal state
         self._start_time = 0.0
         self._turn_start_time = 0.0
         self._last_pose = (0.0, 0.0, 0.0)
@@ -144,13 +173,34 @@ class GoToGoal:
         logger.info(f"  Turn tolerance: {math.degrees(self.config.turn_tolerance):.1f} deg")
         logger.info(f"  Position tolerance: {self.config.position_tolerance:.3f}m")
         logger.info(f"  IMU fusion: {'ENABLED' if self.config.use_imu else 'DISABLED'}")
+        logger.info(f"  Odometry reset: {'ENABLED' if self.config.reset_before_goal else 'DISABLED'}")
     
-    def go_to(self, goal_x: float, goal_y: float,
+    def go_to(self, 
+              goal_x: float, 
+              goal_y: float,
               max_time: Optional[float] = None,
+              reset_odometry: bool = False,
               callback: Optional[Callable] = None) -> bool:
+        """
+        Navigate to goal position
         
+        Args:
+            goal_x: Goal X position (meters)
+            goal_y: Goal Y position (meters)
+            max_time: Maximum time (overrides config)
+            reset_odometry: Reset odometry before starting
+            callback: Optional callback called each loop with status dict
+            
+        Returns:
+            True if goal reached, False otherwise
+        """
         self._status_callback = callback
         
+        # Reset odometry if requested
+        if reset_odometry or self.config.reset_before_goal:
+            self._reset_odometry(0.0, 0.0, 0.0)
+        
+        # Set goal
         if not self._set_goal(goal_x, goal_y):
             return False
         
@@ -202,8 +252,8 @@ class GoToGoal:
                     self.robot.stop()
                     return True
                 
-                # Check if stuck - but only if we're in DRIVING state
-                if self.state == GoToGoalState.DRIVING and self._check_stuck(state):
+                # Stuck detection
+                if self.state == GoToGoalState.DRIVING and self._check_stuck():
                     logger.warning("Stuck detected! Re-turning...")
                     self.state = GoToGoalState.TURNING
                     self._turn_start_time = time.time()
@@ -228,6 +278,12 @@ class GoToGoal:
             self.robot.stop()
             return False
     
+    def _reset_odometry(self, x: float = 0.0, y: float = 0.0, heading: float = 0.0):
+        """Reset robot odometry"""
+        logger.info(f"Resetting odometry to ({x:.2f}, {y:.2f}, {math.degrees(heading):.1f}°)")
+        self.robot.reset_odometry(x, y, heading)
+        time.sleep(0.2)  # Wait for reset to take effect
+    
     def _set_goal(self, x: float, y: float) -> bool:
         self.goal = (x, y)
         self.state = GoToGoalState.TURNING
@@ -236,17 +292,22 @@ class GoToGoal:
         self._stuck_start_time = time.time()
         self.total_distance_traveled = 0.0
         
+        # Reset PIDs for clean start
         self.turn_pid.reset()
         self.drive_pid.reset()
         
+        # Get current pose
         state = self.robot.get_state()
         pose = (state.x, state.y, state.heading)
+        self.start_pose = pose
         self._last_pose = pose
         self._prev_distance = float('inf')
         
+        # Calculate initial distance and heading error
         self.distance_to_goal = self._distance_to_goal(pose[0], pose[1])
         self.heading_error = self._angle_to_goal(pose)
         
+        # Check if already at goal
         if self.distance_to_goal < self.config.position_tolerance:
             self.state = GoToGoalState.GOAL_REACHED
             logger.info("Already at goal!")
@@ -262,17 +323,21 @@ class GoToGoal:
     def _update(self, pose: Tuple[float, float, float],
                 imu_heading: Optional[float] = None) -> Tuple[float, float]:
         
+        # Fuse heading with IMU
         heading = self._fuse_heading(pose[2], imu_heading)
         fused_pose = (pose[0], pose[1], heading)
         
+        # Update distance traveled
         dx = pose[0] - self._last_pose[0]
         dy = pose[1] - self._last_pose[1]
         self.total_distance_traveled += math.sqrt(dx*dx + dy*dy)
         self._last_pose = fused_pose
         
+        # Update distance and heading error
         self.distance_to_goal = self._distance_to_goal(pose[0], pose[1])
         self.heading_error = self._angle_to_goal(fused_pose)
         
+        # State machine
         if self.state == GoToGoalState.TURNING:
             return self._handle_turning(fused_pose)
         elif self.state == GoToGoalState.DRIVING:
@@ -283,6 +348,7 @@ class GoToGoal:
             return (0.0, 0.0)
     
     def _handle_turning(self, pose: Tuple[float, float, float]) -> Tuple[float, float]:
+        # Check timeout
         if time.time() - self._turn_start_time > self.config.turn_timeout:
             logger.warning(f"Turn timeout! Error: {math.degrees(self.heading_error):.1f} deg")
             if abs(self.heading_error) < math.radians(30):
@@ -294,6 +360,7 @@ class GoToGoal:
                 logger.info("Retrying turn...")
                 self.turn_pid.reset()
         
+        # Check if facing goal
         abs_error = abs(self.heading_error)
         if abs_error < self.config.turn_tolerance:
             logger.info(f"Facing goal! Error: {math.degrees(abs_error):.1f} deg")
@@ -301,21 +368,25 @@ class GoToGoal:
             self.drive_pid.reset()
             return self._handle_driving(pose)
         
+        # PID turning
         dt = 1.0 / self.config.control_rate
         w = self.turn_pid.update(self.heading_error, dt)
         
+        # Boost for large errors
         if abs_error > math.radians(90):
             w = math.copysign(self.config.max_angular_speed, w)
         elif abs_error > math.radians(45):
             w = max(-self.config.max_angular_speed * 0.8,
                    min(w, self.config.max_angular_speed * 0.8))
         
+        # Zero linear velocity (turn in place)
         v = 0.0
+        
         self._last_command = (v, w)
         return (v, w)
     
     def _handle_driving(self, pose: Tuple[float, float, float]) -> Tuple[float, float]:
-        # Check if we need to re-turn
+        # Check if need to re-turn
         if abs(self.heading_error) > math.radians(25):
             logger.info(f"Re-turning: error={math.degrees(self.heading_error):.1f} deg")
             self.state = GoToGoalState.TURNING
@@ -336,11 +407,11 @@ class GoToGoal:
         else:
             v = self.config.max_linear_speed
         
-        # Heading correction while driving
+        # Heading correction
         dt = 1.0 / self.config.control_rate
         w = self.drive_pid.update(self.heading_error, dt)
         
-        # Ensure minimum speed to move
+        # Ensure minimum speed
         v = max(self.config.min_linear_speed, v)
         
         self._last_command = (v, w)
@@ -356,9 +427,11 @@ class GoToGoal:
         dt = 1.0 / self.config.control_rate
         w = self.drive_pid.update(self.heading_error, dt) * 0.5
         
+        # Limit angular velocity
         max_w = 0.2
         w = max(-max_w, min(w, max_w))
         
+        # If very close, go straight
         if self.distance_to_goal < 0.08:
             w = 0.0
         
@@ -384,7 +457,7 @@ class GoToGoal:
         fused = imu_heading + w_odom * diff
         return self._normalize_angle(fused)
     
-    def _check_stuck(self, state) -> bool:
+    def _check_stuck(self) -> bool:
         """Check if robot is stuck"""
         if self.state in [GoToGoalState.GOAL_REACHED, GoToGoalState.IDLE,
                           GoToGoalState.TURNING, GoToGoalState.FINAL_APPROACH]:
@@ -462,3 +535,7 @@ class GoToGoal:
     def get_status(self) -> dict:
         state = self.robot.get_state()
         return self._get_status_dict(state, self._last_command[0], self._last_command[1])
+    
+    def reset_odometry(self, x: float = 0.0, y: float = 0.0, heading: float = 0.0):
+        """Reset robot odometry"""
+        self._reset_odometry(x, y, heading)

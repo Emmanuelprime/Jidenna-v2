@@ -21,7 +21,7 @@
 #define MAX_PWM       80
 
 #define DEBOUNCE_TIME_US       1000
-#define ENCODER_PRINT_INTERVAL 50  // Changed from 100 to 50 for 20Hz telemetry
+#define ENCODER_PRINT_INTERVAL 50
 #define ODOMETRY_INTERVAL       20
 
 #define LEFT_FORWARD   HIGH
@@ -57,10 +57,10 @@
 #define MIN_SPEED_FOR_PID 0.02f
 
 // Stop sequence timing
-#define STOP_HOLD_TIME 200  // Hold zero PWM for 200ms when stopping
+#define STOP_HOLD_TIME 200
 
 // Command timeout
-#define COMMAND_TIMEOUT_MS 2000  // Stop if no command received within 500ms
+#define COMMAND_TIMEOUT_MS 2000
 
 // Odometry variables
 float x = 0.0;
@@ -119,7 +119,7 @@ unsigned long lastOdometryUpdate = 0;
 unsigned long lastSpeedMeasure = 0;
 unsigned long lastPIDTime = 0;
 unsigned long lastRampTime = 0;
-unsigned long lastCommandTime = 0;  // Track when last command was received
+unsigned long lastCommandTime = 0;
 
 // Anti-windup and stopping sequence
 bool isStopping = false;
@@ -264,17 +264,37 @@ void setMotors(int leftPwm, int rightPwm) {
 
 // Convert V,W commands to wheel velocities
 void setVW(float linearVel, float angularVel) {
-  // Differential drive kinematics:
-  // vl = V - (W * L)/2
-  // vr = V + (W * L)/2
   float leftVel = linearVel - (angularVel * WHEEL_SEPARATION_M) / 2.0f;
   float rightVel = linearVel + (angularVel * WHEEL_SEPARATION_M) / 2.0f;
   
   rawTargetVl = leftVel;
   rawTargetVr = rightVel;
   
-  // Update command timestamp
   lastCommandTime = millis();
+}
+
+// NEW: Reset odometry function
+void resetOdometry(float newX = 0.0, float newY = 0.0, float newTheta = 0.0) {
+  noInterrupts();
+  x = newX;
+  y = newY;
+  theta = newTheta;
+  // Reset encoder pulse counts to prevent jumps
+  lastLeftPulses = leftPulses;
+  lastRightPulses = rightPulses;
+  interrupts();
+  
+  normalizeAngle();
+  
+  // Send acknowledgment
+  Serial.print("ODOM_RESET,");
+  Serial.print(x, 3);
+  Serial.print(",");
+  Serial.print(y, 3);
+  Serial.print(",");
+  Serial.print(theta, 3);
+  Serial.print(",");
+  Serial.println(millis());
 }
 
 void updateVelocityRamping() {
@@ -345,7 +365,6 @@ void updatePID() {
   
   // Check for command timeout
   if (!isStopping && (now - lastCommandTime > COMMAND_TIMEOUT_MS)) {
-    // No command received within timeout period, initiate stop sequence
     isStopping = true;
     stopStartTime = now;
     setMotors(0, 0);
@@ -415,10 +434,8 @@ void setup() {
   ledcSetup(RIGHT_PWM_CH, PWM_FREQ, PWM_RES);
   ledcAttachPin(RIGHT_PWM, RIGHT_PWM_CH);
 
-  // Initialize I2C with custom pins for MPU6050
   Wire.begin(I2C_SDA, I2C_SCL);
   
-  // Initialize MPU6050
   mpu6050.begin();
   mpu6050.calcGyroOffsets(true);
 
@@ -427,7 +444,7 @@ void setup() {
   lastRampTime = millis();
   lastPIDTime = millis();
   lastOdometryUpdate = millis();
-  lastCommandTime = millis();  // Initialize command time
+  lastCommandTime = millis();
 }
 
 void loop() {
@@ -449,10 +466,8 @@ void loop() {
   }
 
   if (now - lastEncoderPrint >= ENCODER_PRINT_INTERVAL) {
-    // Update MPU6050 data
     mpu6050.update();
     
-    // Print all data with timestamp
     Serial.print(x);
     Serial.print(",");
     Serial.print(y);
@@ -467,7 +482,7 @@ void loop() {
     Serial.print(",");
     Serial.print(mpu6050.getGyroZ());
     Serial.print(",");
-    Serial.println(now);  // Add timestamp in milliseconds
+    Serial.println(now);
     lastEncoderPrint = now;
   }
 
@@ -475,15 +490,30 @@ void loop() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
 
-    // Only accept V,W commands
+    // V,W command: V<linear_velocity>,<angular_velocity>
     if (cmd.startsWith("V") || cmd.startsWith("v")) {
-      // V,W command: V<linear_velocity>,<angular_velocity>
       int commaIndex = cmd.indexOf(',');
       if (commaIndex > 0) {
         float linearVel = cmd.substring(1, commaIndex).toFloat();
         float angularVel = cmd.substring(commaIndex + 1).toFloat();
         isStopping = false;
         setVW(linearVel, angularVel);
+      }
+    }
+    
+    // NEW: Odometry reset command: R<x>,<y>,<theta>
+    // Example: R0,0,0 or R1.5,2.0,0.785
+    else if (cmd.startsWith("R") || cmd.startsWith("r")) {
+      // Parse: R0.000,0.000,0.000
+      int firstComma = cmd.indexOf(',');
+      int secondComma = cmd.indexOf(',', firstComma + 1);
+      
+      if (firstComma > 0 && secondComma > 0) {
+        float newX = cmd.substring(1, firstComma).toFloat();
+        float newY = cmd.substring(firstComma + 1, secondComma).toFloat();
+        float newTheta = cmd.substring(secondComma + 1).toFloat();
+        
+        resetOdometry(newX, newY, newTheta);
       }
     }
     // All other commands are ignored

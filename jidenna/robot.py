@@ -1,7 +1,9 @@
+# robot.py
 from typing import Optional
 import logging
 import threading
 import time
+import math
 from .protocol import RobotProtocol
 from .state import RobotState
 
@@ -52,6 +54,34 @@ class RobotAPI:
     def stop(self) -> bool:
         """Stop robot immediately"""
         return self.set_velocity(0.0, 0.0)
+    
+    def reset_odometry(self, x: float = 0.0, y: float = 0.0, heading: float = 0.0) -> bool:
+        """
+        Reset robot odometry on the ESP32
+        
+        Args:
+            x: New X position in meters
+            y: New Y position in meters
+            heading: New heading in radians
+            
+        Returns:
+            True if reset command was sent successfully
+        """
+        with self._lock:
+            # Send reset command via protocol
+            success = self.protocol.reset_odometry(x, y, heading)
+            
+            if success:
+                # Update local state immediately to avoid mismatch
+                self.state.x = x
+                self.state.y = y
+                self.state.heading = heading
+                self._last_command_time = time.time()
+                
+                heading_deg = math.degrees(heading)
+                logger.info(f"Odometry reset to: ({x:.3f}, {y:.3f}, {heading_deg:.1f}°)")
+            
+            return success
     
     def get_state(self) -> RobotState:
         """Get current robot state"""

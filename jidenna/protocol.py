@@ -1,7 +1,9 @@
+# protocol.py
 import serial
 import serial.tools.list_ports
 from typing import Optional, Tuple
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,45 @@ class RobotProtocol:
             logger.error(f"Failed to send velocity command: {e}")
             return False
     
+    def send_command(self, command: str) -> bool:
+        """
+        Send raw command to ESP32
+        
+        Args:
+            command: Raw command string (should end with newline)
+            
+        Returns:
+            True if command was sent successfully
+        """
+        if not self.is_connected():
+            logger.error("Not connected to ESP32")
+            return False
+        
+        try:
+            self.serial_conn.write(command.encode('ascii'))
+            self.serial_conn.flush()
+            logger.debug(f"Sent command: {command.strip()}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send command: {e}")
+            return False
+    
+    def reset_odometry(self, x: float = 0.0, y: float = 0.0, theta: float = 0.0) -> bool:
+        """
+        Reset robot odometry on ESP32
+        
+        Args:
+            x: New X position in meters
+            y: New Y position in meters
+            theta: New heading in radians
+            
+        Returns:
+            True if reset command was sent successfully
+        """
+        # Format: R<x>,<y>,<theta>\n
+        command = f"R{x:.3f},{y:.3f},{theta:.3f}\n"
+        return self.send_command(command)
+    
     def read_telemetry(self) -> Optional[Tuple[float, ...]]:
         """Read and parse telemetry data from ESP32"""
         if not self.is_connected():
@@ -75,7 +116,19 @@ class RobotProtocol:
                 # Process complete lines
                 while '\n' in self._buffer:
                     line, self._buffer = self._buffer.split('\n', 1)
-                    parsed = self._parse_telemetry_line(line.strip())
+                    line = line.strip()
+                    
+                    # Skip empty lines
+                    if not line:
+                        continue
+                    
+                    # Check for odometry reset acknowledgment
+                    if line.startswith('ODOM_RESET'):
+                        logger.info(f"Odometry reset acknowledged: {line}")
+                        continue
+                    
+                    # Parse telemetry line
+                    parsed = self._parse_telemetry_line(line)
                     if parsed:
                         return parsed
             
@@ -92,14 +145,16 @@ class RobotProtocol:
         try:
             parts = line.split(',')
             if len(parts) != 8:
-                logger.warning(f"Malformed telemetry line: {line}")
+                # Check if it's a different response we should ignore
+                if not line.startswith('ODOM_RESET'):
+                    logger.debug(f"Malformed telemetry line: {line}")
                 return None
             
             # Parse all fields as floats
             values = tuple(float(p) for p in parts)
             return values
         except ValueError:
-            logger.warning(f"Failed to parse telemetry values: {line}")
+            logger.debug(f"Failed to parse telemetry values: {line}")
             return None
     
     def _find_esp32_port(self) -> Optional[str]:
